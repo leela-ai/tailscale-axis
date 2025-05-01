@@ -158,3 +158,4 @@ jobs:
           else
             echo "Adding/overwriting assets on existing release $TAG ..."
             gh release upload "$TAG" dist/**/*.eap --clobber 
+          fi
