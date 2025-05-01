@@ -1,6 +1,6 @@
 # Tailscale ACAP for Axis Cameras
 
-An optimized version of Tailscale VPN for Axis Cameras via a custom Tailscale build from source. This results in up to 25% smaller size than the official builds.
+An optimized version of Tailscale VPN for Axis Cameras via a custom Tailscale build from source. This results in up to 25% smaller size than the official builds. Containing both tailscale and tailscaled, the app has an unpacked size of less than 35MB.
 
 ## Supported architectures
 
@@ -12,7 +12,7 @@ An optimized version of Tailscale VPN for Axis Cameras via a custom Tailscale bu
 Releases are available for download from the [Releases](https://github.com/leela-ai/axis-tailscale/releases) page. We auto-build the latest stable version of Tailscale against armv7hf and aarch64, and produce two builds:
 
 - Root user build (uses kernel-space networking)
-- Non-root user build (uses user-space networking)
+- Non-root user build (uses user-space networking with `--tun=userspace-networking` passed to tailscaled)
 
 Pick the build that matches your use case.
 
