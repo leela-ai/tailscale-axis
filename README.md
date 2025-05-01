@@ -16,6 +16,23 @@ Releases are available for download from the [Releases](https://github.com/leela
 
 Pick the build that matches your use case.
 
+## UI
+
+The application UI tries to parse the auth URL from the log, if it exists. When authorized, it tries to find the current IP, hostname and tags for the device.
+
+<table>
+  <tr>
+    <td>
+      <img src="https://github.com/user-attachments/assets/9602a742-6fbb-4376-9589-ec479fea21a2"><br>Not authorized view
+    </td>
+    <td>
+      <img src="https://github.com/user-attachments/assets/0364edec-1e33-4924-8a08-708847002c4d"><br>Authorized view
+    </td>
+  </tr>
+</table>
+
+
+
 ## Building
 
 ```
