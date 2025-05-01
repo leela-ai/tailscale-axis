@@ -71,8 +71,10 @@ jobs:
           fi
 
           echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
-          # Output the JSON array of build configurations
-          echo "build_configs=$BUILDS_NEEDED_JSON" >> "$GITHUB_OUTPUT"
+          # Output the JSON array of build configurations using multi-line syntax
+          echo "build_configs<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BUILDS_NEEDED_JSON" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx (improves caching speed)
         if: steps.check.outputs.needs_build == 'true'
