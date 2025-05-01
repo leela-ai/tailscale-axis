@@ -1,0 +1,22 @@
+{
+    "schemaVersion": "1.6.0",
+    "acapPackageConf": {
+        "setup": {
+            "appName": "Tailscale",
+            "friendlyName": "Tailscale",
+            "vendor": "Tailscale for Axis - by Leela AI",
+            "embeddedSdkVersion": "3.0",
+            "user": {
+                "group": "",
+                "username": ""
+            },
+            "vendorUrl": "https://www.tailscale.com",
+            "runMode": "once",
+            "version": "",
+            "architecture": ""
+        },
+        "configuration": {
+            "settingPage": "index.html"
+        }
+    }
+}

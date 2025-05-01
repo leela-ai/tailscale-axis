@@ -1,0 +1,99 @@
+#!/bin/sh
+
+# Define the path for Tailscale state files within the package directory
+STATE_DIR="/usr/local/packages/Tailscale/state"
+# Define binary paths
+TAILSCALED_BIN="/usr/local/packages/Tailscale/lib/tailscaled"
+TAILSCALE_BIN="/usr/local/packages/Tailscale/lib/tailscale"
+# Add binary directory to PATH
+export PATH="/usr/local/packages/Tailscale/lib:$PATH"
+
+# Create the state directory if it doesn't exist
+mkdir -p "${STATE_DIR}"
+chmod 755 "${STATE_DIR}" # Restrict permissions for security
+
+echo "Starting Service"
+
+# Ensure binaries are executable (using more restrictive 755)
+# chmod 755 "${TAILSCALED_BIN}"
+# chmod 755 "${TAILSCALE_BIN}"
+chmod 755 "$(command -v tailscaled)"
+chmod 755 "$(command -v tailscale)"
+
+echo "Tailscale binaries are executable"
+
+# Logout any existing tailscale sessions
+${TAILSCALE_BIN} logout
+
+echo "Starting Tailscale daemon"
+# Start the daemon, explicitly setting the state directory and socket path
+${TAILSCALED_BIN} --statedir "${STATE_DIR}" --socket "${STATE_DIR}/tailscaled.sock" __TAILSCALED_ARGS__ &
+
+# Wait for the daemon to be ready before proceeding
+SOCKET_PATH="${STATE_DIR}/tailscaled.sock"
+MAX_ATTEMPTS=30
+ATTEMPT=0
+WAIT_SECONDS=1
+
+echo "Waiting for tailscaled socket to become available..."
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    if [ -S "${SOCKET_PATH}" ]; then
+        echo "Tailscaled socket is ready after $ATTEMPT attempts"
+        break
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    echo "Waiting for tailscaled socket (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+    sleep $WAIT_SECONDS
+done
+
+if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+    echo "ERROR: Tailscaled socket did not become available after $MAX_ATTEMPTS attempts"
+    exit 1
+fi
+
+echo "Service Started"
+echo "Bringing Tailscale up... (Scroll to Bottom of log for auth link if needed)"
+
+# Bring the connection up
+${TAILSCALE_BIN} --socket "${STATE_DIR}/tailscaled.sock" up __TAILSCALE_ARGS__
+
+# Function to fetch and log status
+log_status() {
+    echo "Fetching device status..."
+    STATUS_JSON=$(${TAILSCALE_BIN} --socket "${STATE_DIR}/tailscaled.sock" status --json 2>/dev/null)
+
+    if [ -n "${STATUS_JSON}" ]; then
+        echo "--- STATUS START ---"
+        # Requires jq to be available.
+        IP=$(echo "${STATUS_JSON}" | jq -r '.Self.TailscaleIPs[0] // "N/A"')
+        HOSTNAME=$(echo "${STATUS_JSON}" | jq -r '.Self.HostName // "N/A"')
+        TAGS=$(echo "${STATUS_JSON}" | jq -r '.Self.Tags | if type=="array" then join(", ") else . // "N/A" end')
+        [ "${TAGS}" = "null" ] || [ -z "${TAGS}" ] && TAGS="N/A"
+
+        echo "Device IP: ${IP}"
+        echo "Device Hostname: ${HOSTNAME}"
+        echo "Device Tags: ${TAGS}"
+        echo "--- STATUS END ---"
+    else
+        echo "Warning: Could not fetch Tailscale status."
+    fi
+}
+
+# Give tailscale a moment to settle after 'up' and log status once immediately
+sleep 2
+log_status
+
+# Start background loop to log status periodically (every 6 hours)
+echo "Starting periodic status logging in background (every 6 hours)..."
+(
+    while true; do
+        sleep 21600 # 6 hours
+        echo "--- Periodic Status Check ---"
+        log_status
+    done
+) & # Run the loop in the background
+
+# Wait for the main background daemon process to exit (which it shouldn't normally)
+wait
+
+echo "Tailscale process ended."

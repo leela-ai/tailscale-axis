@@ -1,0 +1,146 @@
+name: Build & Release Tailscale ACAP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SDK_VERSION: "1.15" # Default SDK version used by build.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Fetch latest Tailscale release tag
+        id: tailscale
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r .tag_name)
+          echo "Latest Tailscale tag: $LATEST_TAG"
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check release status and required builds
+        id: check
+        run: |
+          TAG="${{ steps.tailscale.outputs.tag }}"
+          SDK_VER="${{ env.SDK_VERSION }}"
+          echo "Checking release status for tag: $TAG"
+
+          EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || echo "")
+
+          if [[ -n "$EXISTING_ASSETS" ]]; then
+            echo "Release $TAG already exists."
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+            echo "Existing assets:"
+            echo "$EXISTING_ASSETS"
+          else
+            echo "Release $TAG does not exist."
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            EXISTING_ASSETS="" 
+          fi
+
+          declare -A VARIANTS=(
+            ["arm-root"]="arch=arm user_arg='-u root' arch_tag=armv7hf user_suffix='-root'"
+            ["arm-nouser"]="arch=arm user_arg='' arch_tag=armv7hf user_suffix=''"
+            ["aarch64-root"]="arch=aarch64 user_arg='-u root' arch_tag=aarch64 user_suffix='-root'"
+            ["aarch64-nouser"]="arch=aarch64 user_arg='' arch_tag=aarch64 user_suffix=''"
+          )
+
+          BUILDS_NEEDED_JSON='[]' # Initialize as JSON array
+          NEEDS_BUILD="false"
+
+          for key in "${!VARIANTS[@]}"; do
+            eval ${VARIANTS[$key]} 
+            EXPECTED_FILE="tailscale-${TAG}-${arch_tag}${user_suffix}-sdk${SDK_VER}.eap"
+            
+            # Check if file exists using grep
+            if [[ "$(echo "$EXISTING_ASSETS" | grep -qw "$EXPECTED_FILE"; echo $?)" -ne 0 ]]; then
+              echo "Missing artifact: $EXPECTED_FILE - Adding to build list."
+              NEEDS_BUILD="true"
+              # Add build config as JSON object to the array
+              BUILD_CONFIG_JSON=$(jq -n --arg arch "$arch" --arg user_arg "$user_arg" '{arch: $arch, user_arg: $user_arg}')
+              BUILDS_NEEDED_JSON=$(echo "$BUILDS_NEEDED_JSON" | jq --argjson config "$BUILD_CONFIG_JSON" '. + [$config]')
+            else
+              echo "Found existing artifact: $EXPECTED_FILE"
+            fi
+          done
+
+          if [[ "$NEEDS_BUILD" == "false" ]]; then
+             echo "All required artifacts already exist for release $TAG. Nothing to do."
+          fi
+
+          echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
+          # Output the JSON array of build configurations
+          echo "build_configs=$BUILDS_NEEDED_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx (improves caching speed)
+        if: steps.check.outputs.needs_build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Missing ACAP packages in Parallel
+        if: steps.check.outputs.needs_build == 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tailscale.outputs.tag }}"
+          SDK_VER="${{ env.SDK_VERSION }}"
+          BUILDS_JSON='${{ steps.check.outputs.build_configs }}'
+
+          echo "Starting parallel builds for tag $TAG..."
+          echo "Build configurations: $BUILDS_JSON"
+
+          # Check if jq is installed, install if not (should be on ubuntu-latest)
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found, installing..."
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+          # Array to hold background process IDs
+          pids=()
+
+          # Loop through JSON array and start builds in background
+          echo "$BUILDS_JSON" | jq -c '.[]' | while IFS= read -r config; do
+            arch=$(echo "$config" | jq -r '.arch')
+            user_arg=$(echo "$config" | jq -r '.user_arg') # Already includes '-u user' or is empty
+            
+            echo "Starting build for arch: $arch, user_arg: '$user_arg' ..."
+            ./build.sh -a "$arch" $user_arg -T "$TAG" -s "$SDK_VER" & # Run in background
+            pids+=($!) # Store PID
+          done
+
+          echo "Waiting for all builds (${pids[*]}) to complete..."
+          
+          EXIT_CODE=0
+          for pid in "${pids[@]}"; do
+            wait $pid || EXIT_CODE=$?
+            if [[ $EXIT_CODE -ne 0 ]]; then
+              echo "Build with PID $pid failed with exit code $EXIT_CODE."
+              # Optionally exit immediately on first failure, or wait for all
+              # exit $EXIT_CODE 
+            fi
+          done
+
+          if [[ $EXIT_CODE -ne 0 ]]; then
+             echo "One or more builds failed."
+             exit $EXIT_CODE
+          fi
+
+          echo "All builds completed successfully."
+
+          mkdir -p dist
+          find . -maxdepth 1 -name '*.eap' -exec mv {} dist/ \;
+
+      - name: Create or Update GitHub release & Upload artifacts
+        if: steps.check.outputs.needs_build == 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tailscale.outputs.tag }}"
+          if [[ "${{ steps.check.outputs.release_exists }}" == "false" ]]; then
+            echo "Creating new release $TAG..."
+            gh release create "$TAG" dist/*.eap \
+              --title "Tailscale ACAP $TAG (SDK ${{ env.SDK_VERSION }})" \
+              --notes "Automated release containing root & non-root builds for ARMv7 (armv7hf) and AArch64. SDK Version: ${{ env.SDK_VERSION }}."
+          else
+            echo "Uploading new artifacts to existing release $TAG..."
+            gh release upload "$TAG" dist/*.eap --clobber # Use --clobber to replace if accidentally rebuilt
+          fi 
