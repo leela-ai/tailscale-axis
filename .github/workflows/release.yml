@@ -3,12 +3,24 @@ name: Build & Release Tailscale ACAP
 on:
   workflow_dispatch:
 
+# Global environment variables available to all jobs
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  SDK_VERSION: "1.15" # Default SDK version used by build.sh
+
 jobs:
-  build-and-release:
+  # ---------------------------------------------------------------------------
+  # 1) Figure out which variants (if any) actually need to be built.
+  # ---------------------------------------------------------------------------
+  determine-builds:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      SDK_VERSION: "1.15" # Default SDK version used by build.sh
+
+    outputs:
+      tag: ${{ steps.tailscale.outputs.tag }}
+      release_exists: ${{ steps.check.outputs.release_exists }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+      matrix: ${{ steps.check.outputs.build_matrix }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -17,133 +29,130 @@ jobs:
         id: tailscale
         run: |
           LATEST_TAG=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r .tag_name)
-          echo "Latest Tailscale tag: $LATEST_TAG"
           echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Check release status and required builds
+      - name: Determine which variants require building
         id: check
         run: |
+          set -euo pipefail
           TAG="${{ steps.tailscale.outputs.tag }}"
           SDK_VER="${{ env.SDK_VERSION }}"
-          echo "Checking release status for tag: $TAG"
 
-          EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || echo "")
-
-          if [[ -n "$EXISTING_ASSETS" ]]; then
-            echo "Release $TAG already exists."
-            echo "release_exists=true" >> "$GITHUB_OUTPUT"
-            echo "Existing assets:"
-            echo "$EXISTING_ASSETS"
-          else
-            echo "Release $TAG does not exist."
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-            EXISTING_ASSETS="" 
+          # Ensure jq present (ubuntu-latest generally has it, but install if not)
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found, installing..."
+            sudo apt-get update -y && sudo apt-get install -y jq
           fi
 
+          echo "Checking existing release assets for tag: $TAG"
+          EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || echo "")
+
+          # Flag whether release exists
+          if gh release view "$TAG" &> /dev/null; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Variant definitions ------------------------------------------------
+          # key -> "arch=<val> user_arg='<val>' arch_tag=<val> user_suffix='<val>'"
           declare -A VARIANTS=(
             ["arm-root"]="arch=arm user_arg='-u root' arch_tag=armv7hf user_suffix='-root'"
-            ["arm-nouser"]="arch=arm user_arg='' arch_tag=armv7hf user_suffix=''"
+            ["arm-nouser"]="arch=arm user_arg=''        arch_tag=armv7hf user_suffix=''"
             ["aarch64-root"]="arch=aarch64 user_arg='-u root' arch_tag=aarch64 user_suffix='-root'"
-            ["aarch64-nouser"]="arch=aarch64 user_arg='' arch_tag=aarch64 user_suffix=''"
+            ["aarch64-nouser"]="arch=aarch64 user_arg=''        arch_tag=aarch64 user_suffix=''"
           )
 
-          BUILDS_NEEDED_JSON='[]' # Initialize as JSON array
+          BUILD_MATRIX_JSON='[]'
           NEEDS_BUILD="false"
 
           for key in "${!VARIANTS[@]}"; do
-            eval ${VARIANTS[$key]} 
+            eval ${VARIANTS[$key]}  # populates $arch, $user_arg, $arch_tag, $user_suffix
             EXPECTED_FILE="tailscale-${TAG}-${arch_tag}${user_suffix}-sdk${SDK_VER}.eap"
-            
-            # Check if file exists using grep
-            if [[ "$(echo "$EXISTING_ASSETS" | grep -qw "$EXPECTED_FILE"; echo $?)" -ne 0 ]]; then
-              echo "Missing artifact: $EXPECTED_FILE - Adding to build list."
+
+            if ! grep -qw "$EXPECTED_FILE" <<< "$EXISTING_ASSETS"; then
+              echo "Missing artifact: $EXPECTED_FILE — will build."
               NEEDS_BUILD="true"
-              # Add build config as JSON object to the array
-              BUILD_CONFIG_JSON=$(jq -n --arg arch "$arch" --arg user_arg "$user_arg" '{arch: $arch, user_arg: $user_arg}')
-              BUILDS_NEEDED_JSON=$(echo "$BUILDS_NEEDED_JSON" | jq --argjson config "$BUILD_CONFIG_JSON" '. + [$config]')
+              # Materialize JSON object for matrix include
+              CONFIG=$(jq -n \
+                --arg arch "$arch" \
+                --arg user_arg "$user_arg" \
+                --arg arch_tag "$arch_tag" \
+                --arg user_suffix "$user_suffix" \
+                '{arch:$arch, user_arg:$user_arg, arch_tag:$arch_tag, user_suffix:$user_suffix}')
+              BUILD_MATRIX_JSON=$(echo "$BUILD_MATRIX_JSON" | jq --argjson cfg "$CONFIG" '. + [$cfg]')
             else
-              echo "Found existing artifact: $EXPECTED_FILE"
+              echo "Already present: $EXPECTED_FILE — skipping build."
             fi
           done
-
-          if [[ "$NEEDS_BUILD" == "false" ]]; then
-             echo "All required artifacts already exist for release $TAG. Nothing to do."
-          fi
 
           echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
-          # Output the JSON array of build configurations using multi-line syntax
-          echo "build_configs<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$BUILDS_NEEDED_JSON" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "build_matrix=$BUILD_MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx (improves caching speed)
+      - name: Show computed build matrix
         if: steps.check.outputs.needs_build == 'true'
+        run: echo "${{ steps.check.outputs.build_matrix }}"
+
+  # ---------------------------------------------------------------------------
+  # 2) Build each missing variant in parallel via the matrix strategy.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: determine-builds
+    if: needs.determine-builds.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix: ${{ fromJSON(needs.determine-builds.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx (improves caching)
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Missing ACAP packages in Parallel
-        if: steps.check.outputs.needs_build == 'true'
+      - name: Build variant
         run: |
           set -euo pipefail
-          TAG="${{ steps.tailscale.outputs.tag }}"
+          TAG="${{ needs.determine-builds.outputs.tag }}"
           SDK_VER="${{ env.SDK_VERSION }}"
-          BUILDS_JSON='${{ steps.check.outputs.build_configs }}'
 
-          echo "Starting parallel builds for tag $TAG..."
-          echo "Build configurations: $BUILDS_JSON"
+          USER_ARG="${{ matrix.user_arg }}"  # already includes "-u root" or is empty
 
-          # Check if jq is installed, install if not (should be on ubuntu-latest)
-          if ! command -v jq &> /dev/null; then
-            echo "jq not found, installing..."
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
+          echo "Building: arch=${{ matrix.arch }} user_arg='$USER_ARG' tag=$TAG sdk=$SDK_VER"
+          ./build.sh -a "${{ matrix.arch }}" $USER_ARG -T "$TAG" -s "$SDK_VER"
 
-          # Array to hold background process IDs
-          pids=()
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tailscale-${{ needs.determine-builds.outputs.tag }}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}-sdk${{ env.SDK_VERSION }}.eap
+          path: |
+            *.eap
 
-          # Loop through JSON array using process substitution to avoid subshell issues
-          while IFS= read -r config; do
-            arch=$(echo "$config" | jq -r '.arch')
-            user_arg=$(echo "$config" | jq -r '.user_arg') # Already includes '-u user' or is empty
-            
-            echo "Starting build for arch: $arch, user_arg: '$user_arg' ..."
-            # Run in background, redirect stdout/stderr to avoid log interleaving (optional but cleaner)
-            ./build.sh -a "$arch" $user_arg -T "$TAG" -s "$SDK_VER" > "build-${arch}${user_arg// /-}.log" 2>&1 &
-            pids+=($!) # Store PID
-          done < <(echo "$BUILDS_JSON" | jq -c '.[]')
+  # ---------------------------------------------------------------------------
+  # 3) Create (or update) the GitHub release and attach the freshly built artifacts.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [determine-builds, build]
+    if: needs.determine-builds.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
 
-          echo "Waiting for all builds (${pids[*]}) to complete..."
-          
-          EXIT_CODE=0
-          for pid in "${pids[@]}"; do
-            wait $pid || EXIT_CODE=$?
-            if [[ $EXIT_CODE -ne 0 ]]; then
-              echo "Build with PID $pid failed with exit code $EXIT_CODE."
-              # Optionally exit immediately on first failure, or wait for all
-              # exit $EXIT_CODE 
-            fi
-          done
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist
 
-          if [[ $EXIT_CODE -ne 0 ]]; then
-             echo "One or more builds failed."
-             exit $EXIT_CODE
-          fi
-
-          echo "All builds completed successfully."
-
-          mkdir -p dist
-          find . -maxdepth 1 -name '*.eap' -exec mv {} dist/ \;
-
-      - name: Create or Update GitHub release & Upload artifacts
-        if: steps.check.outputs.needs_build == 'true'
+      - name: Create or update GitHub release & upload artifacts
         run: |
           set -euo pipefail
-          TAG="${{ steps.tailscale.outputs.tag }}"
-          if [[ "${{ steps.check.outputs.release_exists }}" == "false" ]]; then
-            echo "Creating new release $TAG..."
-            gh release create "$TAG" dist/*.eap \
+          TAG="${{ needs.determine-builds.outputs.tag }}"
+
+          if [[ "${{ needs.determine-builds.outputs.release_exists }}" == "false" ]]; then
+            echo "Creating new release $TAG ..."
+            gh release create "$TAG" dist/**/*.eap \
               --title "Tailscale ACAP $TAG (SDK ${{ env.SDK_VERSION }})" \
               --notes "Automated release containing root & non-root builds for ARMv7 (armv7hf) and AArch64. SDK Version: ${{ env.SDK_VERSION }}."
           else
-            echo "Uploading new artifacts to existing release $TAG..."
-            gh release upload "$TAG" dist/*.eap --clobber # Use --clobber to replace if accidentally rebuilt
-          fi 
+            echo "Adding/overwriting assets on existing release $TAG ..."
+            gh release upload "$TAG" dist/**/*.eap --clobber 
