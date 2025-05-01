@@ -45,10 +45,15 @@ Builds an Axis ACAP Tailscale package (.eap) with specified parameters.
 ./build.sh -a aarch64 -s 1.4 -u admin -t "--ssh --accept-routes" -T v1.80.0
 ```
 
-## License and acknowledgements
-
-Tailscale is a trademark of Tailscale Inc. Leela AI is not affiliated with Tailscale Inc.
+## Acknowledgements
 
 This repository is based on [Mo3he's](https://github.com/Mo3he/Axis_Cam_Tailscale) original work on bringing Tailscale to Axis cameras.
 
-Tailscale BSD 3-Clause License
+Tailscale is a trademark of Tailscale Inc.  
+Axis is a trademark of Axis Communications AB.
+
+Leela AI is not affiliated with Tailscale Inc or Axis Communications AB. This package is not officially endorsed or supported by either company, and is provided on an "as is" basis by Leela AI, Inc. We provide no warranty or guarantee of any kind, express or implied.
+
+## License
+
+Tailscale is licensed under the [BSD 3-Clause License](https://github.com/tailscale/tailscale/blob/main/LICENSE).
