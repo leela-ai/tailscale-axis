@@ -9,7 +9,7 @@ An optimized version of Tailscale VPN for Axis Cameras via a custom Tailscale bu
 
 ### Releases
 
-Releases are available for download from the [Releases](https://github.com/leela-ai/axis-tailscale/releases) page. We auto-build the latest stable version of Tailscale against armv7hf and aarch64, and produce two builds:
+Releases are available for download from the [Releases](https://github.com/leela-ai/tailscale-axis/releases) page. We auto-build the latest stable version of Tailscale against armv7hf and aarch64, and produce two builds:
 
 - Root user build (uses kernel-space networking)
 - Non-root user build (uses user-space networking with `--tun=userspace-networking` passed to tailscaled)
