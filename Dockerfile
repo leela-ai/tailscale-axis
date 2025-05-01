@@ -109,9 +109,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Verify the file type of the compiled binaries
 RUN file /out/tailscale /out/tailscaled
 
-# Capture the specific tailscale version built
-RUN /out/tailscale version | cut -d ' ' -f 1 > /out/tailscale_version.txt && \
-    echo "--- Captured Tailscale version: $(cat /out/tailscale_version.txt)"
+# Capture the Tailscale version without executing the cross-compiled binary (works even without binfmt)
+RUN set -e; \
+    cd /src/tailscale; \
+    TS_VER=$(git describe --tags --abbrev=0); \
+    echo "${TS_VER}" > /out/tailscale_version.txt; \
+    echo "--- Captured Tailscale version via git: ${TS_VER}"
 
 # === Stage 2: Build ACAP Package ===
 # Force this stage to run on linux/amd64, as the SDK image itself is likely amd64
