@@ -73,21 +73,23 @@ jobs:
             if ! grep -qw "$EXPECTED_FILE" <<< "$EXISTING_ASSETS"; then
               echo "Missing artifact: $EXPECTED_FILE — will build."
               NEEDS_BUILD="true"
-              # Materialize JSON object for matrix include
-              CONFIG=$(jq -n \
+              # Materialize JSON object for matrix include (compact one-liner)
+              CONFIG=$(jq -n -c \
                 --arg arch "$arch" \
                 --arg user_arg "$user_arg" \
                 --arg arch_tag "$arch_tag" \
                 --arg user_suffix "$user_suffix" \
                 '{arch:$arch, user_arg:$user_arg, arch_tag:$arch_tag, user_suffix:$user_suffix}')
-              BUILD_MATRIX_JSON=$(echo "$BUILD_MATRIX_JSON" | jq --argjson cfg "$CONFIG" '. + [$cfg]')
+              BUILD_MATRIX_JSON=$(echo "$BUILD_MATRIX_JSON" | jq -c --argjson cfg "$CONFIG" '. + [$cfg]')
             else
               echo "Already present: $EXPECTED_FILE — skipping build."
             fi
           done
-
+          
           echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
-          echo "build_matrix=$BUILD_MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          # Compact single-line JSON for safe output
+          COMPACT_MATRIX=$(echo "$BUILD_MATRIX_JSON" | jq -c '.')
+          echo "build_matrix=$COMPACT_MATRIX" >> "$GITHUB_OUTPUT"
 
       - name: Show computed build matrix
         if: steps.check.outputs.needs_build == 'true'
