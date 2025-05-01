@@ -125,7 +125,7 @@ jobs:
           ./build.sh -a "${{ matrix.arch }}" $USER_ARG -T "$TAG" -s "$SDK_VER"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: tailscale-${{ needs.determine-builds.outputs.tag }}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}-sdk${{ env.SDK_VERSION }}.eap
           path: |
@@ -141,7 +141,7 @@ jobs:
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: dist
 
