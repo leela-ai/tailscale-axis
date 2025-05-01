@@ -89,7 +89,7 @@ jobs:
           echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
           # Compact single-line JSON for safe output
           COMPACT_MATRIX=$(echo "$BUILD_MATRIX_JSON" | jq -c '.')
-          echo "build_matrix=$COMPACT_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "build_matrix={\"include\":$COMPACT_MATRIX}" >> "$GITHUB_OUTPUT"
 
       - name: Show computed build matrix
         if: steps.check.outputs.needs_build == 'true'
