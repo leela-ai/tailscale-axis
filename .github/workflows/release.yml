@@ -100,15 +100,16 @@ jobs:
           # Array to hold background process IDs
           pids=()
 
-          # Loop through JSON array and start builds in background
-          echo "$BUILDS_JSON" | jq -c '.[]' | while IFS= read -r config; do
+          # Loop through JSON array using process substitution to avoid subshell issues
+          while IFS= read -r config; do
             arch=$(echo "$config" | jq -r '.arch')
             user_arg=$(echo "$config" | jq -r '.user_arg') # Already includes '-u user' or is empty
             
             echo "Starting build for arch: $arch, user_arg: '$user_arg' ..."
-            ./build.sh -a "$arch" $user_arg -T "$TAG" -s "$SDK_VER" & # Run in background
+            # Run in background, redirect stdout/stderr to avoid log interleaving (optional but cleaner)
+            ./build.sh -a "$arch" $user_arg -T "$TAG" -s "$SDK_VER" > "build-${arch}${user_arg// /-}.log" 2>&1 &
             pids+=($!) # Store PID
-          done
+          done < <(echo "$BUILDS_JSON" | jq -c '.[]')
 
           echo "Waiting for all builds (${pids[*]}) to complete..."
           
