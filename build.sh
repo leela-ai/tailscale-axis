@@ -111,10 +111,6 @@ while getopts ":a:s:u:t:T:vh" opt; do
     s) SDK_VERSION="${OPTARG}" ;;
     u) USERNAME="${OPTARG}"    ;;
     t)
-      # Detect missing quotes around -t value (starts with another option flag)
-      if [[ "${OPTARG}" == -* ]]; then
-        fatal "Option -t requires its value to be quoted. Example: -t \"--ssh --accept-routes\""
-      fi
       TAILSCALE_UP_OPTS="${OPTARG}"     ;; # Renamed from TS_OPTS
     T) TS_VERSION_ARG="${OPTARG}" ;; # Store specified Tailscale version
     v) set -x ;;               # Verbose mode
