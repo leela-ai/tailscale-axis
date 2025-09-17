@@ -2,6 +2,8 @@ name: Build & Release Tailscale ACAP
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
 
 # Global environment variables available to all jobs
 env:

@@ -1,5 +1,5 @@
 # Global ARG declarations - must be at the top, before ANY FROM statement
-ARG GO_VERSION=1.24
+ARG GO_VERSION=1.25
 ARG TAILSCALE_VERSION # Set via --build-arg or determined in builder stage
 ARG GOOS=linux
 ARG GOARCH # Set via --build-arg
