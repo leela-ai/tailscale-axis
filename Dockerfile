@@ -1,5 +1,6 @@
 # Global ARG declarations - must be at the top, before ANY FROM statement
-ARG GO_VERSION=1.25
+# Keep in sync with Tailscale's go.mod; GOTOOLCHAIN=auto below covers patch/minor drift.
+ARG GO_VERSION=1.26
 ARG TAILSCALE_VERSION # Set via --build-arg or determined in builder stage
 ARG GOOS=linux
 ARG GOARCH # Set via --build-arg
@@ -14,6 +15,10 @@ ARG TAILSCALE_UP_OPTS # Set via --build-arg, default provided by build.sh
 
 # === Stage 1: Build & Compress Tailscale Binaries ===
 FROM golang:${GO_VERSION} AS builder
+
+# Official golang images pin GOTOOLCHAIN=local, which rejects go.mod versions newer
+# than the image. Allow the toolchain to fetch what Tailscale requires.
+ENV GOTOOLCHAIN=auto
 
 # Expose the architecture settings to this stage
 ARG GOOS

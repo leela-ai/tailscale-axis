@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Fetch latest Tailscale release tag
         id: tailscale
@@ -110,10 +110,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx (improves caching)
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build variant
         run: |
@@ -127,7 +127,7 @@ jobs:
           ./build.sh -a "${{ matrix.arch }}" $USER_ARG -T "$TAG" -s "$SDK_VER"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tailscale-${{ needs.determine-builds.outputs.tag }}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}-sdk${{ env.SDK_VERSION }}.eap
           path: |
@@ -143,10 +143,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
