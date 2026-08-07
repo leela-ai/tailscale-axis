@@ -16,7 +16,14 @@
             "architecture": ""
         },
         "configuration": {
-            "settingPage": "index.html"
+            "settingPage": "index.html",
+            "httpConfig": [
+                {
+                    "type": "transferCgi",
+                    "name": "status.cgi",
+                    "access": "admin"
+                }
+            ]
         }
     }
 }

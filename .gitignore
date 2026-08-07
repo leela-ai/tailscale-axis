@@ -2,3 +2,11 @@
 **/lib/tailscaled
 **/lib/tailscale
 **/*.eap
+
+# Fleet plans hold auth keys once tools/fleet-keys.sh has filled them in. The
+# tracked tools/fleet-plan.example.csv is not matched by this.
+*.plan.csv
+auth_keys.txt
+
+# Per-device packages from tools/fleet-build.sh, each with a key baked in.
+fleet-eaps/

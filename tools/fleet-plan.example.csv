@@ -1,0 +1,22 @@
+# Fleet plan: one row per camera.
+#
+# Semicolon-delimited so that commas remain usable inside tags and extra_opts
+# without any quoting rules. Blank lines and lines starting with # are ignored.
+#
+#   hostname    Tailscale machine name for the device. Must be unique.
+#   tags        Comma-separated ACL tags, each starting with "tag:". Required:
+#               tagged nodes have key expiry disabled, so a camera does not drop
+#               off the tailnet after the default 180 days.
+#   extra_opts  Additional "tailscale up" flags for this device only. Optional.
+#   key_id      Filled in by tools/fleet-keys.sh. Used by --revoke.
+#   authkey     Filled in by tools/fleet-keys.sh. Treat this file as a secret
+#               once it is populated.
+#
+# Fill in the first three columns, then run:
+#   tools/fleet-keys.sh fleet.plan.csv
+#   tools/fleet-build.sh -e <base.eap> -p fleet.plan.csv
+hostname;tags;extra_opts;key_id;authkey
+warehouse-cam-01;tag:camera,tag:warehouse;;;
+warehouse-cam-02;tag:camera,tag:warehouse;;;
+warehouse-cam-03;tag:camera,tag:warehouse;--ssh;;
+loadingbay-cam-01;tag:camera,tag:loadingbay;--advertise-routes=10.20.0.0/24;;

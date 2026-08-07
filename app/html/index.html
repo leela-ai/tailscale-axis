@@ -1,292 +1,658 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Tailscale Control</title>
-    <style>
-        body {
-            font-family: sans-serif;
-            margin: 0 auto; /* Center the content */
-            padding: 20px;
-            max-width: 1280px; /* Limit width for better readability */
-            background-color: #f4f7f6; /* Softer background */
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailscale Control</title>
+<style>
+    :root {
+        color-scheme: light dark;
+
+        --bg:        light-dark(#f4f7f6, #16191b);
+        --panel:     light-dark(#ffffff, #22272a);
+        --text:      light-dark(#1c1f21, #e4e7e9);
+        --muted:     light-dark(#5c6469, #99a2a8);
+        --border:    light-dark(#e2e6e8, #343b3f);
+        --accent:    light-dark(#0b5fa5, #6fb0f5);
+        --ok:        light-dark(#1a7f3c, #4ade80);
+        --warn:      light-dark(#8a5300, #fbbf24);
+        --bad:       light-dark(#b3261e, #f87171);
+        --code-bg:   light-dark(#f6f8f9, #1a1e20);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+        font-family: system-ui, sans-serif;
+        margin-inline: auto;
+        padding: 20px;
+        max-width: 60rem;
+        background-color: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+    }
+
+    #logo {
+        display: block;
+        margin: 10px auto 28px;
+        max-width: 150px;
+        height: auto;
+    }
+
+    /* The logo artwork is black on transparent, so it vanishes on a dark
+       background. Inverting it yields the white-on-dark version. */
+    @media (prefers-color-scheme: dark) {
+        #logo { filter: invert(1); }
+    }
+
+    .card {
+        margin-block-end: 20px;
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background-color: var(--panel);
+
+        & > h2 {
+            margin-block: 0 16px;
+            font-size: 1.15rem;
+            color: var(--accent);
         }
-        #logo {
-            display: block; /* Allow centering */
-            margin: 10px auto 30px auto; /* Center logo and add space below */
-            max-width: 150px; /* Adjust size as needed */
-            height: auto;
+    }
+
+    /* Key/value list. Collapses to stacked rows on narrow viewports. */
+    dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0 1.5rem;
+        margin: 0;
+    }
+
+    dt {
+        font-weight: 600;
+        color: var(--muted);
+        padding-block: 0.6rem;
+    }
+
+    dd {
+        margin: 0;
+        padding-block: 0.6rem;
+        min-inline-size: 0;
+        overflow-wrap: anywhere;
+    }
+
+    dt:nth-of-type(n + 2), dd:nth-of-type(n + 2) {
+        border-block-start: 1px solid var(--border);
+    }
+
+    @media (width < 34rem) {
+        dl { grid-template-columns: 1fr; }
+        dt { padding-block: 0.6rem 0; }
+        dd { padding-block: 0 0.6rem; }
+        dd:nth-of-type(n + 2) { border-block-start: none; }
+    }
+
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5em;
+        padding: 0.2em 0.75em;
+        border-radius: 999px;
+        font-weight: 600;
+        font-size: 0.9em;
+        background: color-mix(in srgb, currentColor 14%, transparent);
+
+        &::before {
+            content: "";
+            inline-size: 0.55em;
+            block-size: 0.55em;
+            border-radius: 50%;
+            background: currentColor;
         }
-        h1 {
-            text-align: center; /* Center the main title */
-            color: #333;
-            margin-bottom: 30px;
+    }
+
+    .tone-ok   { color: var(--ok); }
+    .tone-warn { color: var(--warn); }
+    .tone-bad  { color: var(--bad); }
+
+    @media (prefers-reduced-motion: no-preference) {
+        .badge.tone-warn::before { animation: pulse 1.8s ease-in-out infinite; }
+    }
+    @keyframes pulse { 50% { opacity: 0.25; } }
+
+    .copyable {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        max-inline-size: 100%;
+    }
+
+    .stack {
+        display: flex;
+        flex-direction: column;
+        align-items: start;
+        gap: 0.35rem;
+    }
+
+    .copy {
+        display: inline-grid;
+        place-items: center;
+        inline-size: 1.75rem;
+        block-size: 1.75rem;
+        flex: none;
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+
+        &:hover { color: var(--accent); border-color: var(--accent); }
+        &.done  { color: var(--ok); border-color: var(--ok); }
+        & svg   { inline-size: 0.9rem; block-size: 0.9rem; }
+    }
+
+    #authPanel {
+        margin-block-end: 18px;
+        padding: 16px;
+        border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
+
+        & h3 { margin-block: 0 4px; font-size: 1rem; }
+        & p  { margin-block: 0 12px; color: var(--muted); }
+    }
+
+    .btn-primary {
+        display: inline-block;
+        padding: 0.6rem 1.1rem;
+        border-radius: 6px;
+        background: var(--accent);
+        color: light-dark(#fff, #10161c);
+        font-weight: 600;
+        text-decoration: none;
+
+        &:hover { filter: brightness(1.1); }
+    }
+
+    .auth-url {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-block-start: 12px;
+
+        & code {
+            padding: 0.35rem 0.5rem;
+            border-radius: 5px;
+            background: var(--code-bg);
+            font-size: 0.85em;
+            overflow-wrap: anywhere;
         }
-        .container {
-            margin-bottom: 25px; /* Increased spacing between containers */
-            padding: 20px; /* Increased padding */
-            border: 1px solid #ddd; /* Softer border */
-            border-radius: 8px; /* More rounded corners */
-            background-color: #ffffff; /* White background for containers */
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05); /* Subtle shadow */
-        }
-        .container h2 { margin-top: 0; color: #0056b3; } /* Style section headers */
-        label { display: block; margin-bottom: 8px; font-weight: bold; }
-        input[type="text"], input[type="password"], textarea { width: calc(100% - 18px); padding: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; } /* Adjusted width and margin */
-        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; } /* Slightly larger button */
-        button:hover { background-color: #0056b3; }
-        #status-container { margin-top: 15px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { border: 1px solid #e1e1e1; padding: 10px; text-align: left; } /* Softer table borders and more padding */
-        th { background-color: #f8f8f8; } /* Lighter table header */
-        .status-ok { color: #28a745; font-weight: bold; } /* Updated green */
-        .status-offline { color: #dc3545; } /* Updated red */
-        .error { color: #dc3545; font-weight: bold; }
-        .message { margin-top: 15px; padding: 12px; border-radius: 4px; }
-        .message.success { background-color: #d4edda; border-color: #c3e6cb; color: #155724; }
-        .message.info { background-color: #d1ecf1; border-color: #bee5eb; color: #0c5460; }
-        .message.error { background-color: #f8d7da; border-color: #f5c6cb; color: #721c24; }
-        pre { white-space: pre-wrap; word-wrap: break-word; background-color: #f0f0f0; padding: 12px; border-radius: 4px; margin-top: 8px; border: 1px solid #ddd; } /* Added border to pre */
-        #logFrame { height: 500px; width: 100%; border: 1px solid #ddd; border-radius: 4px; } /* Added radius to iframe */
-         #authUrlDisplay { margin-bottom: 15px; padding: 10px; border: 1px solid #fdc; background-color: #fff9e6; border-radius: 4px; }
-    </style>
+    }
+
+    #healthPanel {
+        margin-block-end: 18px;
+        padding: 14px 16px;
+        border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--bad) 10%, transparent);
+
+        & strong { color: var(--bad); }
+        & ul { margin-block: 6px 0; padding-inline-start: 20px; }
+    }
+
+    [hidden] { display: none !important; }
+
+    .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin-block-end: 12px;
+    }
+
+    button.action {
+        padding: 0.5rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--code-bg);
+        color: var(--text);
+        font-size: 0.95em;
+        cursor: pointer;
+
+        &:hover { border-color: var(--accent); color: var(--accent); }
+    }
+
+    .hint { color: var(--muted); font-size: 0.85em; }
+
+    #logContainer {
+        block-size: 26rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow-y: scroll;
+        background: var(--code-bg);
+    }
+
+    #logContent {
+        margin: 0;
+        padding: 12px;
+        font-family: ui-monospace, monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+
+    footer {
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-align: center;
+
+        & a { color: inherit; }
+    }
+</style>
 </head>
 <body>
 
-<img id="logo" src="tailscale.png" alt="Tailscale Logo"> <!-- Added Logo -->
+<img id="logo" src="tailscale.png" alt="Tailscale">
 
-<!-- Status Display -->
-<div class="container">
+<div class="card">
     <h2>Live Status</h2>
-    <div id="authUrlDisplay" style="display: none; margin-bottom: 15px; padding: 10px; border: 1px solid #fdc; background-color: #fff9e6;">
-        <strong>Authentication Required:</strong> Please visit the following URL to authenticate this device:<br>
-        <a id="authUrlLink" href="#" target="_blank" style="word-wrap: break-word;"></a>
+
+    <div id="authPanel" hidden>
+        <h3>Authentication required</h3>
+        <p>Connect this device to your tailnet to finish setup.</p>
+        <a id="authLink" class="btn-primary" href="#" target="_blank" rel="noopener">Open login page</a>
+        <div class="auth-url">
+            <code id="authUrlText"></code>
+            <button class="copy" type="button" data-copy-target="authUrlText" aria-label="Copy login URL"></button>
+        </div>
     </div>
-    <div id="status-container">
-        <table>
-            <tr><th>Status</th><td id="ts-status">Loading...</td></tr>
-            <tr><th>IP Address</th><td id="ts-ip">Loading...</td></tr>
-            <tr><th>Hostname</th><td id="ts-hostname">Loading...</td></tr>
-            <tr><th>Tags</th><td id="ts-tags">Loading...</td></tr>
-        </table>
+
+    <div id="healthPanel" hidden>
+        <strong>Health warnings</strong>
+        <ul id="healthList"></ul>
     </div>
+
+    <dl id="statusList"></dl>
 </div>
 
-<!-- System Log -->
-<div class="container">
+<div class="card">
     <h2>App log</h2>
-    <div style="margin-bottom: 5px;">
-        <button id="refreshPauseButton" style="margin-bottom: 10px;">Pause Auto-Refresh</button>
-        <span id="refreshStatus" style="margin-left: 10px;">Auto-refreshing...</span>
+    <div class="toolbar">
+        <button id="logToggle" class="action" type="button">Pause auto-refresh</button>
+        <span id="logHint" class="hint">Auto-refreshing...</span>
     </div>
-    <!-- Replaced iframe with a div and pre tag -->
-    <div id="logContainer" style="height: 500px; width: 100%; border: 1px solid #ddd; border-radius: 4px; overflow-y: scroll; background-color: #f8f8f8;">
-        <pre id="logContent" style="margin: 0; padding: 10px; font-family: monospace; font-size: 0.9em; white-space: pre-wrap; word-wrap: break-word;">Loading logs...</pre>
+    <div id="logContainer">
+        <pre id="logContent">Loading logs...</pre>
     </div>
 </div>
 
-<div class="leela">
-    <p style="color: #999; font-size: 12px; line-height: 1.5; text-align: center; width: 100%; display: inline-flex; align-items: center; justify-content: center;">Tailscale is a trademark of Tailscale Inc. Compiled for Axis cameras by <a href="https://leela.ai" target="_blank"><img src="leela.svg" alt="Leela" style="height: 24px; width: auto; margin-inline: 10px; display: block; opacity: 0.5;"></a></p>
-</div>
+<footer>
+    <p>Tailscale is a trademark of Tailscale Inc. Compiled for Axis cameras by
+        <a href="https://leela.ai" target="_blank" rel="noopener">Leela AI</a>.
+    </p>
+</footer>
 
 <script>
-    const authUrlDisplay = document.getElementById('authUrlDisplay');
-    const authUrlLink = document.getElementById('authUrlLink');
-    const logContainer = document.getElementById('logContainer');
-    const logContent = document.getElementById('logContent');
-    const refreshPauseButton = document.getElementById('refreshPauseButton');
-    const refreshStatus = document.getElementById('refreshStatus');
+    const STATUS_URL = 'status.cgi';
+    const LOG_URL = '/axis-cgi/admin/systemlog.cgi?appname=Tailscale';
+    const STATUS_INTERVAL_MS = 5000;
+    const LOG_INTERVAL_MS = 10000;
 
-    // Get references to the status table cells
-    const statusCell = document.getElementById('ts-status');
-    const ipCell = document.getElementById('ts-ip');
-    const hostnameCell = document.getElementById('ts-hostname');
-    const tagsCell = document.getElementById('ts-tags');
+    // Warn this far ahead of the node key expiring. An expired key silently
+    // drops the camera off the tailnet until someone re-authenticates it.
+    const KEY_EXPIRY_WARN_DAYS = 14;
 
-    let refreshIntervalId = null;
-    let isRefreshing = true;
-    const refreshInterval = 10000; // Refresh every 10 seconds
-    let previousLogText = ""; // Store previous log content
+    const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">'
+        + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>'
+        + '<path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h1"/></svg>';
+    const DONE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">'
+        + '<path d="M3 8.5l3.5 3.5L13 5"/></svg>';
 
-    // Flag to prevent fetch overlap
-    let isFetching = false;
+    const el = {
+        authPanel: document.getElementById('authPanel'),
+        authLink: document.getElementById('authLink'),
+        authUrlText: document.getElementById('authUrlText'),
+        healthPanel: document.getElementById('healthPanel'),
+        healthList: document.getElementById('healthList'),
+        statusList: document.getElementById('statusList'),
+        logContainer: document.getElementById('logContainer'),
+        logContent: document.getElementById('logContent'),
+        logToggle: document.getElementById('logToggle'),
+        logHint: document.getElementById('logHint'),
+    };
 
-    // Function to fetch logs, update status, and populate the log viewer
-    function updateLogsAndStatus() {
-        if (isFetching || !isRefreshing) return; // Skip if already fetching or paused
+    // BackendState values reported by tailscaled, mapped to what an operator
+    // needs to know. "NoState" also covers status.cgi failing to reach the
+    // daemon at all.
+    const STATES = {
+        NoState:          { label: 'Starting',                          tone: 'warn' },
+        NeedsLogin:       { label: 'Needs login',                       tone: 'warn' },
+        NeedsMachineAuth: { label: 'Waiting for tailnet admin approval', tone: 'warn' },
+        Stopped:          { label: 'Stopped',                           tone: 'bad'  },
+        Starting:         { label: 'Starting',                          tone: 'warn' },
+        Running:          { label: 'Connected',                         tone: 'ok'   },
+    };
 
-        isFetching = true;
-        console.log("Fetching logs...");
-        refreshStatus.textContent = `Fetching... (Last fetch: ${new Date().toLocaleTimeString()})`;
-
-        fetch('/axis-cgi/admin/systemlog.cgi?appname=Tailscale')
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                return response.text();
-            })
-            .then(fetchedLogText => {
-                // --- Update Log Viewer --- 
-                const shouldScroll = logContainer.scrollTop + logContainer.clientHeight >= logContainer.scrollHeight - 20; // Check scroll *before* updating
-
-                if (previousLogText && fetchedLogText.startsWith(previousLogText)) {
-                    // Append only new lines
-                    const newLines = fetchedLogText.substring(previousLogText.length);
-                    if (newLines) {
-                        logContent.textContent += newLines;
-                        console.log(`Appended ${newLines.split('\n').length - 1} new lines.`);
-                    } else {
-                        console.log("No new lines detected.");
-                    }
-                } else {
-                    // Log rotated or first load, replace entire content
-                    console.log("Log differs or first load; replacing entire content.");
-                    logContent.textContent = fetchedLogText;
-                }
-                previousLogText = fetchedLogText; // Update stored log for next comparison
-
-                // Scroll to bottom only if user was already near the bottom
-                if (shouldScroll) {
-                    logContainer.scrollTop = logContainer.scrollHeight;
-                }
-
-                // --- Update Status Based on Log Content --- 
-                // (Keep the existing logic to parse auth URL vs status details)
-                const authUrlPattern = /\s*(https:\/\/login\.tailscale\.com\/a\/[a-zA-Z0-9]+)/g;
-                const statusEndPattern = /--- STATUS END ---/g;
-                let lastAuthMatch = null;
-                let lastAuthIndex = -1;
-                let match;
-                while ((match = authUrlPattern.exec(fetchedLogText)) !== null) {
-                    lastAuthMatch = match;
-                    lastAuthIndex = match.index;
-                }
-                let lastStatusEndIndex = -1;
-                while ((match = statusEndPattern.exec(fetchedLogText)) !== null) {
-                    lastStatusEndIndex = match.index;
-                }
-                console.log(`Log Parse - Last Auth Index: ${lastAuthIndex}, Last Status End Index: ${lastStatusEndIndex}`);
-
-                if (lastStatusEndIndex >= 0 && (lastAuthIndex === -1 || lastStatusEndIndex > lastAuthIndex)) {
-                    console.log("Log Parse - Status info is latest.");
-                    authUrlDisplay.style.display = 'none';
-                    parseStatusFromLog(fetchedLogText);
-                } else if (lastAuthIndex >= 0) {
-                    console.log("Log Parse - Auth URL is latest.");
-                    const authUrl = lastAuthMatch[1];
-                    authUrlLink.href = authUrl;
-                    authUrlLink.textContent = authUrl;
-                    authUrlDisplay.style.display = 'block';
-                    statusCell.textContent = "Needs Login";
-                    statusCell.className = "status-offline";
-                    ipCell.textContent = "N/A";
-                    hostnameCell.textContent = "N/A";
-                    tagsCell.textContent = "N/A";
-                } else {
-                    console.log("Log Parse - Neither found.");
-                    authUrlDisplay.style.display = 'none';
-                    statusCell.textContent = "Offline / Starting";
-                    statusCell.className = "status-offline";
-                    ipCell.textContent = "N/A";
-                    hostnameCell.textContent = "N/A";
-                    tagsCell.textContent = "N/A";
-                }
-                refreshStatus.textContent = `Auto-refreshing... (Last update: ${new Date().toLocaleTimeString()})`;
-            })
-            .catch(error => {
-                console.error("Error fetching or parsing log content:", error);
-                logContent.textContent = `Error fetching logs: ${error.message}`;
-                statusCell.textContent = "Error Fetching Logs";
-                statusCell.className = "error";
-                ipCell.textContent = "Error";
-                hostnameCell.textContent = "Error";
-                tagsCell.textContent = "Error";
-                refreshStatus.textContent = `Error (Retrying in ${refreshInterval / 1000}s)`;
-            })
-            .finally(() => {
-                isFetching = false; // Allow next fetch
-            });
-    }
-
-    // Function to parse IP, Hostname, Tags from log content
-    function parseStatusFromLog(logText) { // Renamed param for clarity
-        const ipPattern = /Device IP: (\S+)/;
-        const hostnamePattern = /Device Hostname: (\S+)/;
-        const tagsPattern = /Device Tags: (.*)/;
-
-        // Find the *last* occurrences of status details in the log
-        let lastIpMatch = null, lastHostnameMatch = null, lastTagsMatch = null;
-        let match;
-        const ipMatches = logText.match(new RegExp(ipPattern.source, 'g'));
-        if (ipMatches) lastIpMatch = ipMatches[ipMatches.length - 1].match(ipPattern);
-
-        const hostnameMatches = logText.match(new RegExp(hostnamePattern.source, 'g'));
-        if (hostnameMatches) lastHostnameMatch = hostnameMatches[hostnameMatches.length - 1].match(hostnamePattern);
-
-        const tagsMatches = logText.match(new RegExp(tagsPattern.source, 'g'));
-        if (tagsMatches) lastTagsMatch = tagsMatches[tagsMatches.length - 1].match(tagsPattern);
-
-        let foundStatus = false;
-
-        if (lastIpMatch && lastIpMatch[1]) {
-            ipCell.textContent = lastIpMatch[1];
-            foundStatus = true;
-        } else {
-            ipCell.textContent = "N/A"; // Changed from Loading...
-        }
-
-        if (lastHostnameMatch && lastHostnameMatch[1]) {
-            hostnameCell.textContent = lastHostnameMatch[1];
-            foundStatus = true;
-        } else {
-            hostnameCell.textContent = "N/A"; // Changed from Loading...
-        }
-
-        if (lastTagsMatch && lastTagsMatch[1]) {
-            tagsCell.textContent = lastTagsMatch[1].trim() || "N/A";
-            foundStatus = true;
-        } else {
-            tagsCell.textContent = "N/A"; // Changed from Loading...
-        }
-
-        if (foundStatus && ipCell.textContent !== "N/A") {
-            statusCell.textContent = "Connected";
-            statusCell.className = "status-ok";
-        } else if (!authUrlDisplay.style.display || authUrlDisplay.style.display === 'none') {
-             statusCell.textContent = "Offline / Starting";
-             statusCell.className = "status-offline";
-        }
-    }
-
-    // Function to toggle refresh state
-    function toggleRefresh() {
-        isRefreshing = !isRefreshing;
-        if (isRefreshing) {
-            refreshPauseButton.textContent = 'Pause Auto-Refresh';
-            refreshStatus.textContent = 'Auto-refreshing...';
-            updateLogsAndStatus(); // Fetch immediately when resuming
-            if (!refreshIntervalId) { // Avoid multiple intervals
-                 refreshIntervalId = setInterval(updateLogsAndStatus, refreshInterval);
+    /**
+     * Copies text to the clipboard.
+     *
+     * Cameras are usually reached over plain HTTP on a LAN address, which is
+     * not a secure context, so navigator.clipboard is undefined there. Fall
+     * back to a hidden textarea and the legacy execCommand path.
+     *
+     * @param {string} text
+     * @returns {Promise<boolean>} whether the copy succeeded
+     */
+    async function copyText(text) {
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+                // Fall through to the legacy path below.
             }
+        }
+        const scratch = document.createElement('textarea');
+        scratch.value = text;
+        scratch.setAttribute('readonly', '');
+        scratch.style.position = 'fixed';
+        scratch.style.opacity = '0';
+        document.body.append(scratch);
+        scratch.select();
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } catch {
+            ok = false;
+        }
+        scratch.remove();
+        return ok;
+    }
+
+    /**
+     * Builds a button that copies the given text when clicked.
+     *
+     * @param {string} text
+     * @param {string} label accessible label
+     * @returns {HTMLButtonElement}
+     */
+    function copyButton(text, label) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'copy';
+        button.innerHTML = COPY_ICON;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', async () => {
+            if (!await copyText(text)) return;
+            button.innerHTML = DONE_ICON;
+            button.classList.add('done');
+            setTimeout(() => {
+                button.innerHTML = COPY_ICON;
+                button.classList.remove('done');
+            }, 1400);
+        });
+        return button;
+    }
+
+    /**
+     * @param {string} text
+     * @param {string} label
+     * @returns {HTMLElement} the text with a copy button beside it
+     */
+    function copyable(text, label) {
+        const wrap = document.createElement('span');
+        wrap.className = 'copyable';
+        const value = document.createElement('span');
+        value.textContent = text;
+        wrap.append(value, copyButton(text, label));
+        return wrap;
+    }
+
+    /**
+     * @param {string} text
+     * @param {?string} tone one of "ok", "warn", "bad"
+     * @returns {HTMLElement}
+     */
+    function toned(text, tone) {
+        const span = document.createElement('span');
+        span.textContent = text;
+        if (tone) span.className = `tone-${tone}`;
+        return span;
+    }
+
+    /**
+     * Describes the node key expiry. Tagged nodes have expiry disabled by the
+     * control plane, so an absent KeyExpiry on a tagged node means "never"
+     * rather than "unknown".
+     *
+     * @param {object} self the Self object from the status response
+     * @returns {?HTMLElement}
+     */
+    function keyExpiryValue(self) {
+        if (self.Expired) return toned('Expired - re-authenticate this device', 'bad');
+        if (self.KeyExpiry) {
+            const when = new Date(self.KeyExpiry);
+            const days = Math.round((when.getTime() - Date.now()) / 86_400_000);
+            const text = `${when.toLocaleDateString()} (${days} day${days === 1 ? '' : 's'})`;
+            return toned(text, days <= KEY_EXPIRY_WARN_DAYS ? 'warn' : null);
+        }
+        if (self.Tags?.length) return toned('Never (tagged node)', null);
+        return null;
+    }
+
+    /**
+     * Describes how traffic reaches the tailnet. An empty CurAddr with a relay
+     * set means the connection is going through DERP rather than peer-to-peer.
+     *
+     * @param {object} self
+     * @returns {?string}
+     */
+    function connectionValue(self) {
+        if (self.CurAddr) return `Direct (${self.CurAddr})`;
+        if (self.Relay) return `Relayed via ${self.Relay.toUpperCase()}`;
+        return null;
+    }
+
+    /**
+     * Turns a status response into the rows to display. Entries with no value
+     * are dropped rather than rendered as blanks.
+     *
+     * @param {object} st parsed status.cgi response
+     * @returns {Array<{label: string, value: string|HTMLElement}>}
+     */
+    function buildRows(st) {
+        const state = STATES[st.BackendState] ?? { label: st.BackendState || 'Unknown', tone: 'bad' };
+        const self = st.Self ?? {};
+        const running = st.BackendState === 'Running';
+
+        const badge = document.createElement('span');
+        badge.className = `badge tone-${state.tone}`;
+        badge.textContent = st.CGIError ? `${state.label} (daemon unreachable)` : state.label;
+
+        const rows = [{ label: 'Status', value: badge }];
+
+        const add = (label, value) => {
+            if (value !== null && value !== undefined && value !== '') rows.push({ label, value });
+        };
+
+        add('Tailnet', st.CurrentTailnet?.Name);
+
+        // A node normally has both a v4 and a v6 address; keep them in one row
+        // so the list does not grow a blank-labelled second entry.
+        const ips = st.TailscaleIPs ?? [];
+        if (ips.length > 0) {
+            const stack = document.createElement('div');
+            stack.className = 'stack';
+            stack.append(...ips.map(ip => copyable(ip, `Copy ${ip}`)));
+            add(ips.length > 1 ? 'IP addresses' : 'IP address', stack);
+        }
+
+        const dnsName = self.DNSName?.replace(/\.$/, '');
+        if (dnsName) {
+            add('DNS name', copyable(dnsName, `Copy ${dnsName}`));
         } else {
-            refreshPauseButton.textContent = 'Resume Auto-Refresh';
-            refreshStatus.textContent = 'Auto-refresh Paused';
-            clearInterval(refreshIntervalId);
-            refreshIntervalId = null; // Clear the interval ID
+            add('Hostname', self.HostName);
+        }
+
+        if (running) {
+            add('Connection', connectionValue(self));
+            if (self.Online === false) add('Control plane', toned('Unreachable', 'bad'));
+        }
+
+        add('Key expiry', keyExpiryValue(self));
+        add('Tags', self.Tags?.join(', '));
+        add('Advertised routes', self.PrimaryRoutes?.join(', '));
+
+        if (st.ExitNodeStatus) {
+            const exit = st.ExitNodeStatus;
+            add('Exit node', `${exit.TailscaleIPs?.[0] ?? exit.ID}${exit.Online ? '' : ' (offline)'}`);
+        }
+        if (self.ExitNodeOption) add('Exit node', 'This device is offering itself as an exit node');
+
+        // Distinguishes the two packages we ship: the root build routes in the
+        // kernel via TUN, the userless build routes in userspace.
+        if (!st.CGIError) add('Networking', st.TUN ? 'Kernel (TUN)' : 'Userspace');
+
+        add('Client version', st.Version);
+        if (st.ClientVersion?.LatestVersion) {
+            // Only ever populated when the running build is not the latest.
+            const tone = st.ClientVersion.UrgentSecurityUpdate ? 'bad' : 'warn';
+            const note = st.ClientVersion.UrgentSecurityUpdate ? ' (security update)' : '';
+            add('Update available', toned(`${st.ClientVersion.LatestVersion}${note}`, tone));
+        }
+
+        if (st.CGIError) add('Detail', st.CGIError);
+
+        return rows;
+    }
+
+    // Repainting on every poll would clear any text the user is selecting, so
+    // the list is only rebuilt when something actually changed.
+    let lastRowsKey = '';
+
+    function renderRows(rows) {
+        const key = JSON.stringify(rows.map(r => [r.label, typeof r.value === 'string' ? r.value : r.value.textContent]));
+        if (key === lastRowsKey) return;
+        lastRowsKey = key;
+
+        const nodes = [];
+        for (const row of rows) {
+            const dt = document.createElement('dt');
+            dt.textContent = row.label;
+            const dd = document.createElement('dd');
+            dd.append(row.value);
+            nodes.push(dt, dd);
+        }
+        el.statusList.replaceChildren(...nodes);
+    }
+
+    function renderStatus(st) {
+        if (st.AuthURL) {
+            el.authLink.href = st.AuthURL;
+            el.authUrlText.textContent = st.AuthURL;
+            el.authPanel.hidden = false;
+        } else {
+            el.authPanel.hidden = true;
+        }
+
+        // Only surfaced once the daemon is meant to be up. Before login the
+        // health list always carries "Tailscale is stopped.", which is expected
+        // rather than actionable.
+        const health = ['Running', 'Starting'].includes(st.BackendState) ? st.Health ?? [] : [];
+        el.healthList.replaceChildren(...health.map(msg => {
+            const li = document.createElement('li');
+            li.textContent = msg;
+            return li;
+        }));
+        el.healthPanel.hidden = health.length === 0;
+
+        renderRows(buildRows(st));
+    }
+
+    function renderStatusError(err) {
+        el.authPanel.hidden = true;
+        el.healthPanel.hidden = true;
+        renderRows([
+            { label: 'Status', value: Object.assign(document.createElement('span'), {
+                className: 'badge tone-bad', textContent: 'Status unavailable' }) },
+            { label: 'Detail', value: err.message },
+        ]);
+    }
+
+    async function pollStatus() {
+        try {
+            const response = await fetch(STATUS_URL, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            renderStatus(await response.json());
+        } catch (err) {
+            renderStatusError(err);
         }
     }
 
-    // Add event listener to the button
-    refreshPauseButton.addEventListener('click', toggleRefresh);
+    let logTimer = null;
+    let logFetching = false;
+    let previousLog = '';
 
-    // Initial load and start auto-refresh
-    document.addEventListener('DOMContentLoaded', () => {
-        updateLogsAndStatus(); // Initial fetch
-        if (!refreshIntervalId) { // Start interval if not already running (e.g., from toggle)
-            refreshIntervalId = setInterval(updateLogsAndStatus, refreshInterval);
+    async function pollLog() {
+        if (logFetching) return;
+        logFetching = true;
+        try {
+            const response = await fetch(LOG_URL, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const text = await response.text();
+
+            // Preserve the reading position unless already at the bottom.
+            const atBottom = el.logContainer.scrollTop + el.logContainer.clientHeight
+                >= el.logContainer.scrollHeight - 20;
+
+            if (previousLog && text.startsWith(previousLog)) {
+                el.logContent.textContent += text.slice(previousLog.length);
+            } else {
+                el.logContent.textContent = text;
+            }
+            previousLog = text;
+
+            if (atBottom) el.logContainer.scrollTop = el.logContainer.scrollHeight;
+            el.logHint.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (err) {
+            el.logContent.textContent = `Error fetching logs: ${err.message}`;
+            el.logHint.textContent = 'Error fetching logs';
+        } finally {
+            logFetching = false;
+        }
+    }
+
+    document.querySelector('[data-copy-target]').addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        const text = document.getElementById(button.dataset.copyTarget).textContent;
+        if (!await copyText(text)) return;
+        button.innerHTML = DONE_ICON;
+        button.classList.add('done');
+        setTimeout(() => {
+            button.innerHTML = COPY_ICON;
+            button.classList.remove('done');
+        }, 1400);
+    });
+    document.querySelector('[data-copy-target]').innerHTML = COPY_ICON;
+
+    el.logToggle.addEventListener('click', () => {
+        if (logTimer) {
+            clearInterval(logTimer);
+            logTimer = null;
+            el.logToggle.textContent = 'Resume auto-refresh';
+            el.logHint.textContent = 'Auto-refresh paused';
+        } else {
+            logTimer = setInterval(pollLog, LOG_INTERVAL_MS);
+            el.logToggle.textContent = 'Pause auto-refresh';
+            pollLog();
         }
     });
 
+    pollStatus();
+    setInterval(pollStatus, STATUS_INTERVAL_MS);
+    pollLog();
+    logTimer = setInterval(pollLog, LOG_INTERVAL_MS);
 </script>
 
 </body>

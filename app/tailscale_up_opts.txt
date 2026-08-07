@@ -1,0 +1,8 @@
+# Per-device "tailscale up" options, appended after the options baked in at
+# build time so anything set here wins. Blank lines and lines starting with #
+# are ignored; everything else is split on whitespace into arguments.
+#
+# Shipped empty. tools/eap-inject.sh rewrites this file to stamp a built package
+# for one specific device, which avoids rebuilding per device. Do not put the
+# auth key here: it belongs in tailscale_authkey, which is passed by reference so
+# it never reaches the process arguments or the application log.

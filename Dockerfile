@@ -12,32 +12,33 @@ ARG REPO=axisecp
 ARG SDK=acap-native-sdk
 ARG APP_USERNAME # Set via --build-arg (optional)
 ARG TAILSCALE_UP_OPTS # Set via --build-arg, default provided by build.sh
+ARG UPX_COMPRESS=0 # Set to 1 to pack the binary with UPX
 
-# === Stage 1: Build & Compress Tailscale Binaries ===
+# Tailscale features to keep in the build. Everything not listed here (and not
+# pulled in as a dependency of something listed here) is omitted via a
+# ts_omit_* build tag. See the "Feature selection" section in the README for
+# the rationale behind each entry.
+ARG TS_FEATURES="cli,ipnbus,netstack,osrouter,iptables,dns,useroutes,useexitnode,advertiseroutes,advertiseexitnode,ssh,health,portmapper,listenrawdisco,cachenetmap,gro,bakedroots,tailnetlock,doctor,cliconndiag,unixsocketidentity,linkspeed,tundevstats"
+
+# === Stage 1: Build the combined Tailscale binary ===
 FROM golang:${GO_VERSION} AS builder
 
 # Official golang images pin GOTOOLCHAIN=local, which rejects go.mod versions newer
 # than the image. Allow the toolchain to fetch what Tailscale requires.
 ENV GOTOOLCHAIN=auto
 
-# Expose the architecture settings to this stage
+# Expose the build settings to this stage
 ARG GOOS
 ARG GOARCH
 ARG GOARM
 ARG TAILSCALE_VERSION=latest
+ARG TS_FEATURES
+ARG UPX_COMPRESS
 
-# Install build dependencies: git, build tools, curl, jq
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
         git \
-        build-essential \
-        gcc \
-        make \
-        g++ \
-        cmake \
-        libucl-dev \
-        zlib1g-dev \
         ca-certificates \
         file \
         curl \
@@ -46,80 +47,113 @@ RUN set -eux; \
 
 WORKDIR /src
 
-# Clone the full Tailscale repository
+# A full clone is required: cmd/mkversion derives the version stamp with
+# "git rev-list --count HEAD ^<commit that last touched VERSION.txt>", which
+# needs real history. Shallow fetches make that count wrong or fail outright.
 RUN git clone https://github.com/tailscale/tailscale.git
 
-# Change working directory into the cloned source code
 WORKDIR /src/tailscale
 
 # Determine the target version: Use provided TAILSCALE_VERSION arg,
 # otherwise fetch the latest *release* tag from GitHub API.
 RUN set -eux; \
     TARGET_TAG=""; \
-    # Check if a specific version is requested via build arg
     if [ -n "${TAILSCALE_VERSION}" ] && [ "${TAILSCALE_VERSION}" != "latest" ]; then \
       TARGET_TAG="${TAILSCALE_VERSION}"; \
       echo ">>> Using specified Tailscale tag: $TARGET_TAG"; \
-      # Fetch the specific tag if needed (might not be in initial clone)
-      echo "Fetching specific tag $TARGET_TAG..."; \
-      # Use shallow fetch for specific tags to save time/bandwidth
-      git fetch --depth 1 origin "refs/tags/$TARGET_TAG"; \
     else \
       echo ">>> Fetching latest stable release tag from GitHub API..."; \
-      # Use GitHub API to find the latest non-prerelease, non-draft release
-      # -f (--fail) makes curl exit non-zero on server error (e.g., 404)
-      # -s (--silent) hides progress meter
-      # -L (--location) follows redirects
       API_URL="https://api.github.com/repos/tailscale/tailscale/releases/latest"; \
-      LATEST_RELEASE_TAG=$(curl -sfSL "${API_URL}" | jq -r .tag_name); \
-      # Check if API call succeeded and returned a valid tag (starts with v)
-      if [ $? -eq 0 ] && [ -n "$LATEST_RELEASE_TAG" ] && [ "$(echo $LATEST_RELEASE_TAG | cut -c1)" = "v" ]; then \
+      LATEST_RELEASE_TAG=$(curl -sfSL "${API_URL}" | jq -r .tag_name || true); \
+      if [ -n "$LATEST_RELEASE_TAG" ] && [ "$(echo $LATEST_RELEASE_TAG | cut -c1)" = "v" ]; then \
         TARGET_TAG="$LATEST_RELEASE_TAG"; \
         echo ">>> Using latest stable release tag from GitHub API: $TARGET_TAG"; \
-        # Fetch the specific tag if needed (might not be in initial clone)
-        echo "Fetching specific tag $TARGET_TAG..."; \
-        git fetch --depth 1 origin "refs/tags/$TARGET_TAG"; \
       else \
-        # Fallback: If API fails or returns unexpected format, use the old git tag logic
-        echo "!!! GitHub API failed (curl exit code $?), returned tag '$LATEST_RELEASE_TAG'. Falling back to git tag logic..."; \
-        # Ensure all tags are available locally for fallback
-        git fetch --tags --force; \
+        echo "!!! GitHub API returned tag '$LATEST_RELEASE_TAG'. Falling back to git tag logic..."; \
         TARGET_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v -E 'rc|beta|alpha' | head -n 1); \
-        if [ -z "$TARGET_TAG" ]; then \
-            echo "!!! Could not find latest stable tag via git. Finding absolute latest tag..."; \
-            TARGET_TAG=$(git describe --tags $(git rev-list --tags --max-count=1)); \
-        fi; \
         if [ -z "$TARGET_TAG" ]; then \
             echo "!!! FATAL: Could not determine any latest tag via git fallback."; exit 1; \
         fi; \
         echo ">>> Using latest tag found via git fallback: $TARGET_TAG"; \
       fi; \
     fi; \
-    # Checkout the determined tag
     echo ">>> Checking out $TARGET_TAG..."; \
-    git checkout "$TARGET_TAG";
+    git -c advice.detachedHead=false checkout "$TARGET_TAG"
 
-# Build tailscale and tailscaled with maximum size optimizations
-#   -s -w : strip symbol table & DWARF info
-#   -buildid= : omits buildid (a few KB)
-#   -trimpath : removes GOPATH and module root prefixes from file paths
-#   CGO_ENABLED=0 ensures fully static pure-Go binary (smaller & no libc dependency)
-ENV LD_FLAGS="-s -w -buildid="
-
+# Resolve TS_FEATURES into a Go build tag list.
+#
+# cmd/featuretags only validates names passed to --remove, not --add: an
+# unknown name in --add is silently accepted and the feature it was meant to
+# keep gets omitted anyway. Validate against --list first so a typo fails the
+# build instead of quietly shipping a crippled binary.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
-    GOOS=${GOOS} GOARCH=${GOARCH} GOARM=${GOARM} CGO_ENABLED=0 go build -v -trimpath -ldflags="$LD_FLAGS" -o /out/tailscale ./cmd/tailscale && \
-    GOOS=${GOOS} GOARCH=${GOARCH} GOARM=${GOARM} CGO_ENABLED=0 go build -v -trimpath -ldflags="$LD_FLAGS" -o /out/tailscaled ./cmd/tailscaled
+    set -eu; \
+    mkdir -p /out; \
+    go run ./cmd/featuretags --list | sed -n 's/^[[:space:]]*\([^:]*\):.*/\1/p' > /tmp/known_features; \
+    MISSING=""; \
+    for f in $(echo "${TS_FEATURES}" | tr ',' ' '); do \
+        grep -qx -- "$f" /tmp/known_features || MISSING="${MISSING} $f"; \
+    done; \
+    if [ -n "${MISSING}" ]; then \
+        echo "!!! FATAL: unknown Tailscale feature(s):${MISSING}"; \
+        echo "!!! Known features:"; sed 's/^/!!!   /' /tmp/known_features; \
+        exit 1; \
+    fi; \
+    go run ./cmd/featuretags --min --add="${TS_FEATURES}" > /out/build_tags.txt; \
+    echo "--- Keeping features: ${TS_FEATURES}"; \
+    echo "--- Resolved build tags: $(cat /out/build_tags.txt)"
 
-# Verify the file type of the compiled binaries
-RUN file /out/tailscale /out/tailscaled
+# Build a single binary containing both the daemon and the CLI.
+#
+# The "cli" feature emits the ts_include_cli tag, which links cmd/tailscale/cli
+# into cmd/tailscaled. The binary then behaves as the CLI when argv[0] is
+# "tailscale" or when TS_BE_CLI is set, and as the daemon otherwise.
+#
+#   -s -w        strip symbol table & DWARF info
+#   -buildid=    omit the build ID
+#   -trimpath    remove GOPATH and module root prefixes from file paths
+#   -buildvcs=false  do not embed VCS metadata (we stamp the version explicitly)
+#   -X ...Stamp  burn in the version, as tailscale's own build_dist.sh does;
+#                without these the node reports a devel version to the control plane
+#   CGO_ENABLED=0  fully static pure-Go binary, no libc dependency
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    set -eu; \
+    eval "$(./build_dist.sh shellvars)"; \
+    echo "--- Version stamps: short=${VERSION_SHORT} long=${VERSION_LONG}"; \
+    GOOS=${GOOS} GOARCH=${GOARCH} GOARM=${GOARM:-} CGO_ENABLED=0 go build \
+        -v \
+        -tags "$(cat /out/build_tags.txt)" \
+        -trimpath \
+        -buildvcs=false \
+        -ldflags "-s -w -buildid= -X tailscale.com/version.longStamp=${VERSION_LONG} -X tailscale.com/version.shortStamp=${VERSION_SHORT}" \
+        -o /out/tailscaled \
+        ./cmd/tailscaled; \
+    printf '%s\n' "${VERSION_SHORT}" > /out/tailscale_version_short.txt
 
-# Capture the Tailscale version without executing the cross-compiled binary (works even without binfmt)
-RUN set -e; \
-    cd /src/tailscale; \
+# Record the release tag separately from the version stamp: the tag is what the
+# artifact is named after, and it is needed even when packaging is done in a
+# stage that has no git checkout.
+RUN set -eu; \
     TS_VER=$(git describe --tags --abbrev=0); \
-    echo "${TS_VER}" > /out/tailscale_version.txt; \
-    echo "--- Captured Tailscale version via git: ${TS_VER}"
+    printf '%s\n' "${TS_VER}" > /out/tailscale_version.txt; \
+    echo "--- Captured Tailscale release tag: ${TS_VER}"
+
+# Optionally pack the binary with UPX. This roughly quarters the on-flash size
+# at the cost of the whole binary being resident in RAM after self-extraction,
+# plus decompression on every invocation (including CLI calls).
+RUN set -eu; \
+    if [ "${UPX_COMPRESS}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends upx-ucl && rm -rf /var/lib/apt/lists/*; \
+        echo "--- Size before UPX:"; du -h /out/tailscaled; \
+        upx --lzma --best /out/tailscaled; \
+        echo "--- Size after UPX:"; du -h /out/tailscaled; \
+    else \
+        echo "--- UPX compression disabled"; \
+    fi
+
+RUN file /out/tailscaled && du -h /out/tailscaled
 
 # === Stage 2: Build ACAP Package ===
 # Force this stage to run on linux/amd64, as the SDK image itself is likely amd64
@@ -132,53 +166,54 @@ ARG APP_USERNAME
 ARG ACAP_ARCH_TAG
 ARG TAILSCALE_UP_OPTS
 ARG SDK_VERSION
+ARG UPX_COMPRESS
 
-# Log the arguments received by this stage
-RUN echo ">>> ACAP Packager Args: REPO=${REPO}, SDK=${SDK}, SDK_VERSION=${SDK_VERSION}, ACAP_ARCH_TAG=${ACAP_ARCH_TAG}, APP_USERNAME=${APP_USERNAME:-<none>}, TAILSCALE_UP_OPTS='${TAILSCALE_UP_OPTS}'"
+RUN echo ">>> ACAP Packager Args: REPO=${REPO}, SDK=${SDK}, SDK_VERSION=${SDK_VERSION}, ACAP_ARCH_TAG=${ACAP_ARCH_TAG}, APP_USERNAME=${APP_USERNAME:-<none>}, TAILSCALE_UP_OPTS='${TAILSCALE_UP_OPTS}', UPX_COMPRESS=${UPX_COMPRESS}"
 
 WORKDIR /opt/app
 
-# Copy application files (manifest, run script, html, cgi-bin, etc.)
+# Copy application files (manifest, run script, CGI, html, etc.)
 COPY ./app /opt/app/
 
-# Ensure a clean lib directory before inserting new binaries
+# Ensure a clean lib directory before inserting the binary
 RUN rm -rf /opt/app/lib && mkdir -p /opt/app/lib
 
-# Copy the built & compressed binaries from the builder stage
-COPY --from=builder /out/tailscale /opt/app/lib/tailscale
 COPY --from=builder /out/tailscaled /opt/app/lib/tailscaled
-
-# Copy the captured version file
 COPY --from=builder /out/tailscale_version.txt /tmp/tailscale_version.txt
+COPY --from=builder /out/build_tags.txt /tmp/build_tags.txt
+
+# Provide the conventional "tailscale" name for interactive use. The symlink is
+# created here rather than copied so it is stored as a symlink regardless of how
+# COPY resolves links. Nothing in the package depends on it: the start script
+# and the CGI both select the CLI with TS_BE_CLI, which works even if the
+# on-device installer flattens or drops symlinks.
+RUN ln -s tailscaled /opt/app/lib/tailscale
 
 # Install jq and sed
 RUN apt-get update && apt-get install -y --no-install-recommends jq sed && rm -rf /var/lib/apt/lists/*
 
 # Calculate, log, and save all dynamic variables to temp files
 RUN export RAW_TS_VERSION=$(cat /tmp/tailscale_version.txt) && \
-    # Calculate CLEAN_TS_VERSION
     export CLEAN_TS_VERSION=$(echo "${RAW_TS_VERSION}" | sed -n 's/^v*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p') && \
     if [ -z "${CLEAN_TS_VERSION}" ]; then CLEAN_TS_VERSION="${RAW_TS_VERSION}"; fi && \
-    # Calculate TAILSCALED_EXTRA_ARGS
     TAILSCALED_EXTRA_ARGS="" && \
     if [ "${APP_USERNAME}" != "root" ]; then \
         TAILSCALED_EXTRA_ARGS="--tun=userspace-networking"; \
     fi && \
-    # Calculate FINAL_TS_UP_OPTS
     FINAL_TS_UP_OPTS=$(echo "${TAILSCALE_UP_OPTS}" | xargs) && \
-    # --- Log calculated values --- \
     echo "== Variable Calculation Step ==" && \
     echo "RAW_TS_VERSION=${RAW_TS_VERSION}" && \
     echo "CLEAN_TS_VERSION=${CLEAN_TS_VERSION}" && \
     echo "TAILSCALED_EXTRA_ARGS=${TAILSCALED_EXTRA_ARGS}" && \
     echo "FINAL_TS_UP_OPTS=${FINAL_TS_UP_OPTS}" && \
+    echo "BUILD_TAGS=$(cat /tmp/build_tags.txt)" && \
     echo "=============================" && \
-    # --- Write variables to temp files --- \
     echo "${CLEAN_TS_VERSION}" > /tmp/var_clean_ts_version && \
     echo "${TAILSCALED_EXTRA_ARGS}" > /tmp/var_ts_daemon_args && \
     echo "${FINAL_TS_UP_OPTS}" > /tmp/var_ts_up_opts
 
-# Update manifest.json using the saved clean version
+# Update manifest.json: version, architecture, optional user, and the CGI
+# declaration that lets the settings page read live daemon status.
 RUN set -e; \
     export CLEAN_TS_VERSION=$(cat /tmp/var_clean_ts_version); \
     echo "--- Updating manifest.json with Version: ${CLEAN_TS_VERSION}, Arch: ${ACAP_ARCH_TAG}, User: ${APP_USERNAME:-<none>}, SDK: ${SDK_VERSION}"; \
@@ -199,8 +234,7 @@ RUN set -e; \
     fi; \
     mv /tmp/manifest.json.tmp /opt/app/manifest.json
 
-# Make Tailscale script executable
-RUN chmod +x /opt/app/Tailscale
+RUN chmod +x /opt/app/Tailscale /opt/app/status.cgi
 
 # Inject tailscaled daemon arguments from saved file
 RUN export DAEMON_ARGS=$(cat /tmp/var_ts_daemon_args) && \
@@ -212,14 +246,23 @@ RUN export UP_ARGS=$(cat /tmp/var_ts_up_opts) && \
     echo "--- Injecting tailscale up args: '${UP_ARGS}' into /opt/app/Tailscale up line ---" && \
     sed -i "s%__TAILSCALE_ARGS__%${UP_ARGS}%" /opt/app/Tailscale
 
-# Copy final version file, log binary sizes, set secure permissions, and cleanup temp files
+# Copy final version file, log binary size, set permissions, and clean up
 RUN cp /tmp/tailscale_version.txt /opt/app/tailscale_version.txt && \
-    echo "--- Size of Tailscale binaries:" && \
-    du -sh /opt/app/lib/tailscale /opt/app/lib/tailscaled && \
-    chmod 755 /opt/app/lib/tailscale /opt/app/lib/tailscaled && \
-    rm /tmp/tailscale_version.txt /tmp/var_clean_ts_version /tmp/var_ts_daemon_args /tmp/var_ts_up_opts
+    echo "--- Size of the combined Tailscale binary:" && \
+    du -h /opt/app/lib/tailscaled && \
+    chmod 755 /opt/app/lib/tailscaled && \
+    rm /tmp/tailscale_version.txt /tmp/build_tags.txt /tmp/var_clean_ts_version /tmp/var_ts_daemon_args /tmp/var_ts_up_opts
 
-# Run the ACAP build process
+# Run the ACAP build process.
+#
+# status.cgi must be passed with -a: the manifest's httpConfig entry only
+# generates cgi.conf (the access-control file), it does not add the script
+# itself to the package. Without -a the CGI is declared but missing at runtime.
+#
+# The two tailscale_up_opts.txt / tailscale_authkey placeholders are shipped
+# empty so that tools/eap-inject.sh can stamp a device-specific auth key into a
+# finished package by rewriting existing package members, rather than adding
+# files the package manifest never declared.
 RUN . /opt/axis/acapsdk/environment-setup* && \
     echo "--- Debugging before acap-build ---" && \
     echo "Current directory: $(pwd)" && \
@@ -229,4 +272,4 @@ RUN . /opt/axis/acapsdk/environment-setup* && \
     cat manifest.json && \
     echo "-------------------------------------" && \
     echo "DEBUG: Running acap-build with Arch='${ACAP_ARCH_TAG}', User='${APP_USERNAME:-<none>}'" && \
-    acap-build .
+    acap-build . -a status.cgi -a tailscale_up_opts.txt -a tailscale_authkey
