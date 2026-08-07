@@ -40,7 +40,6 @@ jobs:
           TAG="${{ steps.tailscale.outputs.tag }}"
           SDK_VER="${{ env.SDK_VERSION }}"
 
-          # Ensure jq present (ubuntu-latest generally has it, but install if not)
           if ! command -v jq &> /dev/null; then
             echo "jq not found, installing..."
             sudo apt-get update -y && sudo apt-get install -y jq
@@ -49,47 +48,58 @@ jobs:
           echo "Checking existing release assets for tag: $TAG"
           EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || echo "")
 
-          # Flag whether release exists
           if gh release view "$TAG" &> /dev/null; then
             echo "release_exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "release_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Variant definitions ------------------------------------------------
-          # key -> "arch=<val> user_arg='<val>' arch_tag=<val> user_suffix='<val>'"
-          declare -A VARIANTS=(
-            ["arm-root"]="arch=arm user_arg='-u root' arch_tag=armv7hf user_suffix='-root'"
-            ["arm-nouser"]="arch=arm user_arg=''        arch_tag=armv7hf user_suffix=''"
-            ["aarch64-root"]="arch=aarch64 user_arg='-u root' arch_tag=aarch64 user_suffix='-root'"
-            ["aarch64-nouser"]="arch=aarch64 user_arg=''        arch_tag=aarch64 user_suffix=''"
-          )
-
           BUILD_MATRIX_JSON='[]'
           NEEDS_BUILD="false"
 
-          for key in "${!VARIANTS[@]}"; do
-            eval ${VARIANTS[$key]}  # populates $arch, $user_arg, $arch_tag, $user_suffix
-            EXPECTED_FILE="tailscale-${TAG}-${arch_tag}${user_suffix}-sdk${SDK_VER}.eap"
+          # Every combination of architecture, package user and UPX packing.
+          # The root builds use kernel networking; the userless builds run the
+          # daemon with --tun=userspace-networking. The -upx builds are the same
+          # packages with the binary compressed.
+          for arch in arm aarch64; do
+            case "$arch" in
+              arm)     arch_tag=armv7hf ;;
+              aarch64) arch_tag=aarch64 ;;
+            esac
+            for user in root nouser; do
+              case "$user" in
+                root)   user_arg="-u root"; user_suffix="-root" ;;
+                nouser) user_arg="";        user_suffix=""      ;;
+              esac
+              for upx in plain upx; do
+                case "$upx" in
+                  plain) upx_arg="";   upx_suffix=""     ;;
+                  upx)   upx_arg="-U"; upx_suffix="-upx" ;;
+                esac
 
-            if ! grep -qw "$EXPECTED_FILE" <<< "$EXISTING_ASSETS"; then
-              echo "Missing artifact: $EXPECTED_FILE — will build."
-              NEEDS_BUILD="true"
-              # Materialize JSON object for matrix include (compact one-liner)
-              CONFIG=$(jq -n -c \
-                --arg arch "$arch" \
-                --arg user_arg "$user_arg" \
-                --arg arch_tag "$arch_tag" \
-                --arg user_suffix "$user_suffix" \
-                '{arch:$arch, user_arg:$user_arg, arch_tag:$arch_tag, user_suffix:$user_suffix}')
-              BUILD_MATRIX_JSON=$(echo "$BUILD_MATRIX_JSON" | jq -c --argjson cfg "$CONFIG" '. + [$cfg]')
-            else
-              echo "Already present: $EXPECTED_FILE — skipping build."
-            fi
+                EXPECTED_FILE="tailscale-${TAG}-${arch_tag}${user_suffix}${upx_suffix}-sdk${SDK_VER}.eap"
+
+                if grep -qw "$EXPECTED_FILE" <<< "$EXISTING_ASSETS"; then
+                  echo "Already present: $EXPECTED_FILE — skipping build."
+                  continue
+                fi
+
+                echo "Missing artifact: $EXPECTED_FILE — will build."
+                NEEDS_BUILD="true"
+                CONFIG=$(jq -n -c \
+                  --arg arch "$arch" \
+                  --arg user_arg "$user_arg" \
+                  --arg upx_arg "$upx_arg" \
+                  --arg arch_tag "$arch_tag" \
+                  --arg user_suffix "$user_suffix" \
+                  --arg upx_suffix "$upx_suffix" \
+                  '{arch:$arch, user_arg:$user_arg, upx_arg:$upx_arg, arch_tag:$arch_tag, user_suffix:$user_suffix, upx_suffix:$upx_suffix}')
+                BUILD_MATRIX_JSON=$(echo "$BUILD_MATRIX_JSON" | jq -c --argjson cfg "$CONFIG" '. + [$cfg]')
+              done
+            done
           done
-          
+
           echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
-          # Compact single-line JSON for safe output
           COMPACT_MATRIX=$(echo "$BUILD_MATRIX_JSON" | jq -c '.')
           echo "build_matrix={\"include\":$COMPACT_MATRIX}" >> "$GITHUB_OUTPUT"
 
@@ -112,6 +122,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # Required by smoke-test.sh, which executes the cross-compiled binary.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
       - name: Set up Docker Buildx (improves caching)
         uses: docker/setup-buildx-action@v4
 
@@ -121,23 +135,70 @@ jobs:
           TAG="${{ needs.determine-builds.outputs.tag }}"
           SDK_VER="${{ env.SDK_VERSION }}"
 
-          USER_ARG="${{ matrix.user_arg }}"  # already includes "-u root" or is empty
+          USER_ARG="${{ matrix.user_arg }}"  # "-u root" or empty
+          UPX_ARG="${{ matrix.upx_arg }}"    # "-U" or empty
 
-          echo "Building: arch=${{ matrix.arch }} user_arg='$USER_ARG' tag=$TAG sdk=$SDK_VER"
-          ./build.sh -a "${{ matrix.arch }}" $USER_ARG -T "$TAG" -s "$SDK_VER"
+          echo "Building: arch=${{ matrix.arch }} user_arg='$USER_ARG' upx_arg='$UPX_ARG' tag=$TAG sdk=$SDK_VER"
+          ./build.sh -a "${{ matrix.arch }}" $USER_ARG $UPX_ARG -T "$TAG" -s "$SDK_VER"
+
+      - name: Smoke test the package
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.determine-builds.outputs.tag }}"
+          EAP="tailscale-${TAG}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}${{ matrix.upx_suffix }}-sdk${{ env.SDK_VERSION }}.eap"
+          ./smoke-test.sh "$EAP"
+
+      # Confirms a finished package can still be stamped for a single device and
+      # comes out identical to its base apart from the two injected members.
+      # The injected copy is written outside the workspace and deleted straight
+      # after, so a package carrying a dummy key can never reach the release.
+      - name: Verify per-device injection
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.determine-builds.outputs.tag }}"
+          EAP="tailscale-${TAG}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}${{ matrix.upx_suffix }}-sdk${{ env.SDK_VERSION }}.eap"
+          OUT="${RUNNER_TEMP}/injected"
+          trap 'rm -rf "$OUT"' EXIT
+
+          ./tools/eap-inject.sh \
+            -e "$EAP" \
+            -o "--hostname=ci-test-cam --advertise-tags=tag:ci" \
+            -k "tskey-auth-kCIDUMMY0CNTRL-000000000000000000000000" \
+            -n ci-test-cam \
+            -d "$OUT"
+
+          ./smoke-test.sh --injected-from "$EAP" \
+            "${OUT}/$(basename "$EAP" .eap)-ci-test-cam.eap"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tailscale-${{ needs.determine-builds.outputs.tag }}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}-sdk${{ env.SDK_VERSION }}.eap
+          name: tailscale-${{ needs.determine-builds.outputs.tag }}-${{ matrix.arch_tag }}${{ matrix.user_suffix }}${{ matrix.upx_suffix }}-sdk${{ env.SDK_VERSION }}.eap
           path: |
             *.eap
 
   # ---------------------------------------------------------------------------
-  # 3) Create (or update) the GitHub release and attach the freshly built artifacts.
+  # 3) Check how the start script turns build-time options, injected options and
+  #    an injected auth key into a "tailscale up" command line. Architecture
+  #    independent, so it runs once rather than per matrix variant.
+  # ---------------------------------------------------------------------------
+  start-script-test:
+    needs: determine-builds
+    if: needs.determine-builds.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check start script argument composition
+        run: ./tools/start-script-test.sh
+
+  # ---------------------------------------------------------------------------
+  # 4) Create (or update) the GitHub release and attach the freshly built artifacts.
   # ---------------------------------------------------------------------------
   release:
-    needs: [determine-builds, build]
+    needs: [determine-builds, build, start-script-test]
     if: needs.determine-builds.outputs.needs_build == 'true'
     runs-on: ubuntu-latest
 
@@ -159,8 +220,8 @@ jobs:
             echo "Creating new release $TAG ..."
             gh release create "$TAG" dist/**/*.eap \
               --title "Tailscale ACAP $TAG (SDK ${{ env.SDK_VERSION }})" \
-              --notes "Automated release containing root & non-root builds for ARMv7 (armv7hf) and AArch64. SDK Version: ${{ env.SDK_VERSION }}."
+              --notes "Automated release containing root & non-root builds for ARMv7 (armv7hf) and AArch64, each in a standard and a UPX-compressed (-upx) variant. SDK Version: ${{ env.SDK_VERSION }}."
           else
             echo "Adding/overwriting assets on existing release $TAG ..."
-            gh release upload "$TAG" dist/**/*.eap --clobber 
+            gh release upload "$TAG" dist/**/*.eap --clobber
           fi

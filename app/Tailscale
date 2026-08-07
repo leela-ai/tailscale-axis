@@ -1,39 +1,68 @@
 #!/bin/sh
 
-# Define the path for Tailscale state files within the package directory
-STATE_DIR="/usr/local/packages/Tailscale/state"
-# Define binary paths
-TAILSCALED_BIN="/usr/local/packages/Tailscale/lib/tailscaled"
-TAILSCALE_BIN="/usr/local/packages/Tailscale/lib/tailscale"
-# Add binary directory to PATH
-export PATH="/usr/local/packages/Tailscale/lib:$PATH"
+APP_DIR="/usr/local/packages/Tailscale"
+LIB_DIR="${APP_DIR}/lib"
+STATE_DIR="${APP_DIR}/state"
+SOCKET_PATH="${STATE_DIR}/tailscaled.sock"
 
-# Create the state directory if it doesn't exist
+# Per-device options and auth key. Both ship empty and are rewritten in place by
+# tools/eap-inject.sh, so one built package can be stamped for many devices
+# without rebuilding. See app/tailscale_up_opts.txt for the file format.
+UP_OPTS_FILE="${APP_DIR}/tailscale_up_opts.txt"
+AUTHKEY_FILE="${APP_DIR}/tailscale_authkey"
+
+# One binary provides both the daemon and the CLI (built with ts_include_cli).
+TAILSCALED_BIN="${LIB_DIR}/tailscaled"
+
+# How often the background watcher samples status for the app log. The settings
+# page does not read this; it polls status.cgi directly. This only exists so the
+# log carries a record of state changes for support purposes.
+STATUS_POLL_SECONDS=30
+
+# Makes "tailscale" available to Tailscale SSH sessions, which descend from the
+# daemon started below.
+export PATH="${LIB_DIR}:${PATH}"
+
+# Runs the combined binary as the CLI. TS_BE_CLI is used rather than the
+# lib/tailscale symlink so this keeps working even if the on-device installer
+# does not preserve symlinks.
+ts() {
+    TS_BE_CLI=1 "${TAILSCALED_BIN}" --socket "${SOCKET_PATH}" "$@"
+}
+
+# Logs the status output whenever it differs from the last sample. When login is
+# pending this includes the "Log in at: <url>" line, so the log stays useful
+# without anything having to parse it.
+status_watcher() {
+    _prev=""
+    while true; do
+        _cur=$(ts status --peers=false 2>&1)
+        if [ "${_cur}" != "${_prev}" ]; then
+            echo "--- Tailscale status ---"
+            printf '%s\n' "${_cur}"
+            _prev="${_cur}"
+        fi
+        sleep "${STATUS_POLL_SECONDS}"
+    done
+}
+
 mkdir -p "${STATE_DIR}"
-chmod 755 "${STATE_DIR}" # Restrict permissions for security
+chmod 755 "${STATE_DIR}"
 
 echo "Starting Service"
+"${TAILSCALED_BIN}" --version
 
-# Ensure binaries are executable (using more restrictive 755)
-# chmod 755 "${TAILSCALED_BIN}"
-# chmod 755 "${TAILSCALE_BIN}"
-chmod 755 "$(command -v tailscaled)"
-chmod 755 "$(command -v tailscale)"
-
-echo "Tailscale binaries are executable"
-
-# Logout any existing tailscale sessions
-${TAILSCALE_BIN} logout
+# The state directory survives restarts, so a socket from the previous run can
+# still be here. Without this the readiness check below passes immediately on
+# the stale entry, and the CLI then races the daemon replacing it.
+rm -f "${SOCKET_PATH}"
 
 echo "Starting Tailscale daemon"
-# Start the daemon, explicitly setting the state directory and socket path
-${TAILSCALED_BIN} --statedir "${STATE_DIR}" --socket "${STATE_DIR}/tailscaled.sock" __TAILSCALED_ARGS__ &
+"${TAILSCALED_BIN}" --statedir "${STATE_DIR}" --socket "${SOCKET_PATH}" __TAILSCALED_ARGS__ &
+DAEMON_PID=$!
 
-# Wait for the daemon to be ready before proceeding
-SOCKET_PATH="${STATE_DIR}/tailscaled.sock"
 MAX_ATTEMPTS=30
 ATTEMPT=0
-WAIT_SECONDS=1
 
 echo "Waiting for tailscaled socket to become available..."
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
@@ -41,59 +70,65 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         echo "Tailscaled socket is ready after $ATTEMPT attempts"
         break
     fi
+    # A daemon that gave up (rather than one still retrying, as it does when
+    # the TUN device is missing) is never going to produce the socket, so report
+    # that instead of spending the full timeout on it.
+    if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+        echo "ERROR: tailscaled exited before creating its socket; see the messages above"
+        exit 1
+    fi
     ATTEMPT=$((ATTEMPT + 1))
     echo "Waiting for tailscaled socket (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
-    sleep $WAIT_SECONDS
+    sleep 1
 done
 
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+if [ ! -S "${SOCKET_PATH}" ]; then
+    # Reached when tailscaled is alive but stuck, typically retrying a TUN
+    # device it cannot create. Stop it rather than leaving an orphan behind.
     echo "ERROR: Tailscaled socket did not become available after $MAX_ATTEMPTS attempts"
+    kill "${DAEMON_PID}" 2>/dev/null
     exit 1
 fi
 
 echo "Service Started"
-echo "Bringing Tailscale up... (Scroll to Bottom of log for auth link if needed)"
 
-# Bring the connection up
-${TAILSCALE_BIN} --socket "${STATE_DIR}/tailscaled.sock" up __TAILSCALE_ARGS__
+# Started before "tailscale up" because up blocks until authentication
+# completes, which can be indefinitely if nobody visits the login URL.
+status_watcher &
+WATCHER_PID=$!
 
-# Function to fetch and log status
-log_status() {
-    echo "Fetching device status..."
-    STATUS_JSON=$(${TAILSCALE_BIN} --socket "${STATE_DIR}/tailscaled.sock" status --json 2>/dev/null)
+# Options baked in at build time come first, so anything injected for this
+# specific device overrides them: tailscale parses these with Go's flag package,
+# where a repeated flag takes its last occurrence.
+UP_ARGS="__TAILSCALE_ARGS__"
 
-    if [ -n "${STATUS_JSON}" ]; then
-        echo "--- STATUS START ---"
-        # Requires jq to be available.
-        IP=$(echo "${STATUS_JSON}" | jq -r '.Self.TailscaleIPs[0] // "N/A"')
-        HOSTNAME=$(echo "${STATUS_JSON}" | jq -r '.Self.HostName // "N/A"')
-        TAGS=$(echo "${STATUS_JSON}" | jq -r '.Self.Tags | if type=="array" then join(", ") else . // "N/A" end')
-        [ "${TAGS}" = "null" ] || [ -z "${TAGS}" ] && TAGS="N/A"
-
-        echo "Device IP: ${IP}"
-        echo "Device Hostname: ${HOSTNAME}"
-        echo "Device Tags: ${TAGS}"
-        echo "--- STATUS END ---"
-    else
-        echo "Warning: Could not fetch Tailscale status."
+if [ -f "${UP_OPTS_FILE}" ]; then
+    INJECTED_OPTS=$(grep -v '^[[:space:]]*#' "${UP_OPTS_FILE}" | tr '\n' ' ')
+    if [ -n "$(printf '%s' "${INJECTED_OPTS}" | tr -d '[:space:]')" ]; then
+        UP_ARGS="${UP_ARGS} ${INJECTED_OPTS}"
     fi
-}
+fi
 
-# Give tailscale a moment to settle after 'up' and log status once immediately
-sleep 2
-log_status
+# Passed by reference rather than by value. "tailscale up" resolves a "file:"
+# prefix by reading and trimming the file, which keeps the key out of the
+# process arguments and out of the line logged below. The application log is
+# readable from the settings page, so an inline key would be exposed there.
+if [ -f "${AUTHKEY_FILE}" ] && grep -q '^tskey-' "${AUTHKEY_FILE}"; then
+    echo "Found an injected auth key; authenticating without user interaction"
+    UP_ARGS="${UP_ARGS} --auth-key=file:${AUTHKEY_FILE}"
+fi
 
-# Start background loop to log status periodically (every 6 hours)
-echo "Starting periodic status logging in background (every 6 hours)..."
-(
-    while true; do
-        sleep 21600 # 6 hours
-        echo "--- Periodic Status Check ---"
-        log_status
-    done
-) & # Run the loop in the background
+echo "Bringing Tailscale up with: ${UP_ARGS}"
+echo "(check the status above for the auth link if login is needed)"
+# shellcheck disable=SC2086 # unquoted on purpose: UP_ARGS holds several arguments
+ts up ${UP_ARGS}
 
-# Wait for the main background daemon process to exit (which it shouldn't normally)
-wait
+# Wait on the daemon specifically. A bare "wait" would also wait on the watcher,
+# which never exits, and would leave this script alive after tailscaled died.
+wait "${DAEMON_PID}"
+DAEMON_RC=$?
 
-echo "Tailscale process ended."
+kill "${WATCHER_PID}" 2>/dev/null
+
+echo "Tailscale daemon exited with status ${DAEMON_RC}"
+exit "${DAEMON_RC}"
